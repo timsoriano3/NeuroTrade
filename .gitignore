@@ -1,0 +1,157 @@
+# NeuroTrade
+#
+# The repo is a monorepo that will span Python, Go and TypeScript. Only Python
+# exists today; the other sections are here so nothing slips through when api/
+# and ui/ land in Phase 3.
+
+# ── Local planning docs (Notion is the source of truth) ──────
+TRADER_PLAN.md
+MARKET_RESEARCH.md
+
+# ── Secrets & machine-local config ───────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+config/local/
+config/*.local.yaml
+ibkr_credentials*
+.ib_*
+
+# ═════════════════════════ Python ════════════════════════════
+__pycache__/
+*.py[cod]
+*.so
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Environments. uv.lock IS committed — research runs must be reproducible.
+.venv/
+venv/
+.uv/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# ═══════════════════════════ Go ══════════════════════════════
+# go.work and go.sum are committed; go.work.sum is not.
+*.exe
+*.dll
+*.dylib
+*.test
+*.out
+go.work.sum
+vendor/
+/api/bin/
+
+# ═══════════════════ TypeScript / Node / UI ══════════════════
+node_modules/
+.pnpm-store/
+*-debug.log*
+ui/dist/
+ui/build/
+ui/.vite/
+.turbo/
+*.tsbuildinfo
+.eslintcache
+# Regenerated from the api/ OpenAPI spec — never hand-edited.
+ui/src/api/generated/
+
+# ═════════════════ Rust (Nautilus extensions) ════════════════
+target/
+
+# ═══════════════════════ Data & corpus ═══════════════════════
+# Market data is never committed. It is large, it is immutable, and the
+# crawlers rebuild it from scratch.
+data/
+corpus/
+warehouse/
+*.parquet
+*.arrow
+*.feather
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite3
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.csv.gz
+
+# ═════════════════════ ML artifacts ══════════════════════════
+mlruns/
+mlartifacts/
+models/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.engine
+*.cbm
+*.joblib
+wandb/
+lightning_logs/
+optuna*.db
+ray_results/
+
+# ═════════════════════ Runtime & ops ═════════════════════════
+logs/
+*.log
+run/
+tmp/
+.tmp/
+*.pid
+replays/
+journal/
+snapshots/
+pgdata/
+redis_data/
+prometheus_data/
+grafana_data/
+docker-compose.override.yml
+
+# ═════════════════════ Editors & OS ══════════════════════════
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.idea/
+*.iml
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+*.swp
+*.swo
+*~
+.direnv/
+
+# ═════════════════════ Claude / agents ═══════════════════════
+.claude/settings.local.json
+
+# ── Test fixtures are exempt from the data rules above ───────
+!tests/fixtures/**
+!**/testdata/**
