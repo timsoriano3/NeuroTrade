@@ -34,6 +34,7 @@ setup: ## Install dependencies for every toolchain present
 	uv sync
 	@if $(call have,go)   && [ -f go.work ];             then go work sync; else echo 'go: SKIP'; fi
 	@if $(call have,pnpm) && [ -f pnpm-workspace.yaml ]; then pnpm install; else echo 'pnpm: SKIP'; fi
+	$(PY) pre-commit install
 
 # ── Aggregates ───────────────────────────────────────────────
 check: lint typecheck test ## Full gate — run before declaring work done

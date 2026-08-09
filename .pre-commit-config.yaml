@@ -1,0 +1,41 @@
+# Fast checks that run on staged files at `git commit`.
+#
+# Deliberately NOT a mirror of `make check`: mypy and pytest are too slow to sit
+# in front of every commit, and a hook slow enough to be annoying gets bypassed
+# with --no-verify, which catches nothing. Those run in CI, which cannot be
+# bypassed. This layer exists to keep formatting and junk files out of history.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict # macOS is case-insensitive; CI on Linux is not
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      # Lint fixes first, then format — ruff's recommended order, since a fix
+      # can leave code the formatter then needs to lay out.
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: no-market-data
+        name: block market-data files
+        entry: >-
+          Market data must not be committed. It belongs under data/, which is
+          gitignored and rebuilt by the crawlers. If this is a test fixture, put
+          it under tests/fixtures/.
+        language: fail
+        files: '\.(parquet|duckdb|arrow|feather|h5|hdf5|npy|npz|pkl)$'
+        exclude: '^tests/fixtures/'
