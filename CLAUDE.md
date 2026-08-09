@@ -78,6 +78,12 @@ These change how code must be written. Violating one is a defect even if tests p
   primary failure mode.
 - **No wall-clock outside `LiveClock`.** Everything takes time from the `Clock` port. `datetime.now()`
   in domain code breaks replay determinism.
+- **Money and prices are `Decimal`; derived features are `float`.** Anything that becomes a P&L, a
+  position size or an audit record uses the `Decimal`-backed value objects in `neurotrade.core.types`.
+  Indicators and model inputs stay `float`. Never construct a `Price`/`Quantity`/`Money` from a
+  `float` — it raises. At a feed boundary use `from_float`, which routes via `repr`.
+- **Cross-currency arithmetic raises.** US and Canadian names trade simultaneously, so USD and CAD
+  are both live. Converting needs an explicit rate and is not the domain layer's job.
 - **Determinism is testable.** Two replays of the same session must produce identical digests. Seed
   every RNG through the registry; never depend on dict/set iteration order.
 - **Raw data is immutable.** `raw/` is never mutated; `derived/` is always recomputable from it.

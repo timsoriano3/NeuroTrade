@@ -48,9 +48,6 @@ select = [
     "DTZ",      # naive datetimes — see the wall-clock invariant in CLAUDE.md
 ]
 
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ANN"]
-
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
