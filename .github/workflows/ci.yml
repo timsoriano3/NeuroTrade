@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  # Work happens on branches and merges through PRs. `pull_request` covers any
+  # branch once a PR is open; `push` on main covers the merge itself. Pushing to
+  # a branch with no PR yet is deliberately not a trigger — with `branches: '**'`
+  # every push to a PR branch would run CI twice. Use workflow_dispatch to run
+  # against a branch on demand before opening the PR.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run for the same branch. head_ref is the
+# source branch on a PR; ref is the branch on a push. Using both means a PR run
+# and a branch run collapse into one group instead of racing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # One job per language. `api/` (Go) and `ui/` (TypeScript) get sibling jobs in
+  # Phase 3; per-path filtering is worth adding once there is a second language
+  # for it to filter.
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The bounds of requires-python. Development happens on 3.13; 3.12 is
+        # tested so the declared floor stays honest.
+        python: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --locked fails if uv.lock is stale against pyproject.toml, rather than
+      # silently resolving something CI-only that nobody else is running.
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python }}
+
+      # Separate steps so a failure is attributable at a glance in the UI.
+      - name: Lint
+        run: make py-lint
+
+      - name: Typecheck
+        run: make py-typecheck
+
+      - name: Test
+        run: make py-test
