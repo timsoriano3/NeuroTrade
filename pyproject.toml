@@ -10,9 +10,59 @@ requires-python = ">=3.12,<3.14"
 # one is here. Nothing in this commit imports anything.
 dependencies = []
 
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/neurotrade"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# ── Lint & format ────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "SIM",      # simplify
+    "TID",      # tidy imports
+    "RUF",
+    "ANN",      # missing annotations
+    "DTZ",      # naive datetimes — see the wall-clock invariant in CLAUDE.md
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+# ── Types ────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+
+# ── Tests ────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+# A warning in this system is usually a correctness signal, not noise.
+filterwarnings = ["error"]
