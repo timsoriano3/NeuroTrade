@@ -27,14 +27,21 @@ from decimal import Decimal
 from enum import StrEnum
 
 from neurotrade.core.clock import Nanos
-from neurotrade.core.types import Price, Quantity, Side, Symbol
+from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 
 __all__ = [
     "Bar",
     "BarInterval",
+    "Event",
+    "HaltReason",
     "MarketEvent",
+    "MarketSession",
     "Quote",
+    "SessionBoundary",
     "TickTrade",
+    "TradingHalt",
+    "TradingResumed",
+    "VenueEvent",
 ]
 
 
@@ -79,14 +86,17 @@ _INTERVAL_NANOS: dict[BarInterval, Nanos] = {
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class MarketEvent:
-    """Base for anything observed from the market.
+class Event:
+    """Anything that happened, at a knowable time, in a knowable order.
+
+    Holds only what every event needs: the two timestamps and the tiebreaker.
+    Scope — which instrument, which venue — is added by the subclasses below,
+    because not every event is about a single instrument.
 
     Keyword-only because these records are wide and positional construction of
-    four near-identical integers is a bug waiting to happen.
+    several near-identical integers is a bug waiting to happen.
     """
 
-    symbol: Symbol
     ts_event: Nanos
     ts_init: Nanos
     seq: int = 0
@@ -109,6 +119,26 @@ class MarketEvent:
         rather than surface a real problem. Monitor it; do not enforce it.
         """
         return self.ts_init - self.ts_event
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MarketEvent(Event):
+    """An observation about one instrument."""
+
+    symbol: Symbol
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VenueEvent(Event):
+    """An observation about a venue as a whole.
+
+    Session transitions apply to every instrument listed on a venue at once.
+    Modelling them as per-instrument events would mean emitting one per symbol
+    in the universe at each boundary — thousands of identical records saying the
+    same thing, and a replay whose ordering depends on universe membership.
+    """
+
+    venue: Venue
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -242,3 +272,79 @@ class TickTrade(MarketEvent):
     @property
     def notional(self) -> Decimal:
         return self.price.value * self.size.value
+
+
+class MarketSession(StrEnum):
+    """Phases of a trading day.
+
+    These are venue facts about when orders may execute, not judgements about
+    when it is sensible to trade. The 12:00-14:00 ET liquidity lull is a
+    *regime* (§5.7) and is classified separately — it happens inside REGULAR.
+    """
+
+    PRE = "PRE"
+    REGULAR = "REGULAR"
+    POST = "POST"
+    CLOSED = "CLOSED"
+
+    @property
+    def is_tradable(self) -> bool:
+        return self is not MarketSession.CLOSED
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionBoundary(VenueEvent):
+    """A venue moving from one session phase into another.
+
+    ``session`` is the phase being *entered*. Anchored reference levels depend
+    on these: pre-market high/low, the opening range and session VWAP all reset
+    at a boundary, so a missed transition silently corrupts every level derived
+    from it.
+    """
+
+    session: MarketSession
+
+    @property
+    def opens_regular_trading(self) -> bool:
+        return self.session is MarketSession.REGULAR
+
+
+class HaltReason(StrEnum):
+    """Why trading in an instrument stopped.
+
+    LULD is the common one intraday and the one §5.2's halt-resumption strategy
+    targets. News halts resolve on a different timescale and are not tradable
+    the same way, so the distinction matters to more than reporting.
+    """
+
+    LULD = "LULD"
+    NEWS_PENDING = "NEWS_PENDING"
+    NEWS_DISSEMINATION = "NEWS_DISSEMINATION"
+    REGULATORY = "REGULATORY"
+    OPERATIONAL = "OPERATIONAL"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TradingHalt(MarketEvent):
+    """Trading in one instrument has stopped.
+
+    Two things must happen on receipt, and both are risk decisions rather than
+    data handling: open positions cannot be exited while halted, and stale
+    quotes must stop feeding features that assume a live market.
+    """
+
+    reason: HaltReason = HaltReason.UNKNOWN
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TradingResumed(MarketEvent):
+    """Trading in one instrument has restarted.
+
+    ``auction_price`` is the reopening auction print where the venue publishes
+    one. It is the first real price after the halt, and the reference the
+    resumption strategy measures continuation against — the pre-halt price is
+    stale by definition.
+    """
+
+    auction_price: Price | None = None

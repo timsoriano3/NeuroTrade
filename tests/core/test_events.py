@@ -282,6 +282,11 @@ def test_subclasses_run_base_class_validation(build: object) -> None:
 
 
 def test_events_are_keyword_only() -> None:
-    """Positional construction of several near-identical integers invites bugs."""
+    """Positional construction of several near-identical integers invites bugs.
+
+    Passing a single positional argument is enough to prove it, and unlike a
+    full positional call it does not silently change meaning when a field is
+    added or reordered.
+    """
     with pytest.raises(TypeError):
-        MarketEvent(AAPL, OPEN_NS, OPEN_NS, 0)  # type: ignore[call-arg]
+        MarketEvent(OPEN_NS)  # type: ignore[call-arg]
