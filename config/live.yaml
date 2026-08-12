@@ -1,0 +1,8 @@
+# Live: live data, real fills, real capital (§10.1).
+#
+# The only profile permitted to move money. Everything else about it should
+# match paper — if this file grows settings that paper.yaml lacks, the paper
+# results stop being evidence about live behaviour.
+
+log_level: INFO
+allow_live_orders: true

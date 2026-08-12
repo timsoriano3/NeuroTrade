@@ -1,0 +1,8 @@
+# Research: historical data, modelled fills, no capital (§10.1).
+#
+# The default profile, chosen because it is the only one that cannot spend
+# money if the environment forgets to say which profile it wants.
+
+# Backtests and data audits are noisy on purpose — this is where you want to see
+# every rejected bar and every pacing decision.
+log_level: DEBUG

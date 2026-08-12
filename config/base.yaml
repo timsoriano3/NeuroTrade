@@ -1,0 +1,16 @@
+# Settings common to every profile.
+#
+# Anything here can be overridden by config/<profile>.yaml, then by .env, then
+# by real environment variables — see the precedence note in config.py.
+# Machine-specific values belong in the environment, not in this file: it is
+# committed, and the path below is correct for a checkout, not for a rig.
+
+storage:
+  # Relative to the working directory. Override with NEUROTRADE_STORAGE__DATA_ROOT
+  # to point at an external NVMe or a mounted volume.
+  data_root: data
+
+log_level: INFO
+
+# Never enabled here. Only the live profile turns this on, and only ever there.
+allow_live_orders: false

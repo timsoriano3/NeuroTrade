@@ -5,10 +5,13 @@ description = "Autonomous day-trading system for US and Canadian equities"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 
-# Deliberately empty. Every dependency is added by the commit that introduces the
-# code needing it, so `git log -p pyproject.toml` reads as a history of why each
-# one is here. Nothing in this commit imports anything.
-dependencies = []
+# Every dependency is added by the commit that introduces the code needing it,
+# so `git log -p pyproject.toml` reads as a history of why each one is here.
+dependencies = [
+    "pydantic>=2.13.4",          # typed settings and validation
+    "pydantic-settings>=2.15.0", # profile + environment layering
+    "pyyaml>=6.0.3",             # profile files
+]
 
 [dependency-groups]
 dev = [
@@ -16,6 +19,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "pre-commit>=4.6.1",
+    "types-pyyaml",
 ]
 
 [build-system]
@@ -54,8 +58,11 @@ ban-relative-imports = "all"
 # ── Types ────────────────────────────────────────────────────
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "tests"]
+files = ["src", "tests", "conftest.py"]
 strict = true
+# Teaches mypy about pydantic models: validates constructor calls and
+# enforces frozen-model assignment rules that are otherwise invisible.
+plugins = ["pydantic.mypy"]
 warn_unreachable = true
 
 # ── Tests ────────────────────────────────────────────────────

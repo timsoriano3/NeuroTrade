@@ -1,0 +1,7 @@
+# Paper: live data, simulated fills against the real book, no capital (§10.1).
+#
+# Deliberately identical to live apart from allow_live_orders, so that anything
+# discovered here transfers. A paper profile that diverges from live is a paper
+# profile that proves nothing.
+
+log_level: INFO
