@@ -28,6 +28,8 @@ irrelevant, with no image rebuild. Nested values use a double underscore, so
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from enum import StrEnum
 from pathlib import Path
@@ -40,8 +42,17 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 __all__ = [
     "Profile",
     "Settings",
+    "config_hash",
     "load_settings",
 ]
+
+ENVIRONMENTAL: dict[str, Any] = {"environmental": True}
+"""Marks a field as describing *where* the system runs, not *what it decides*.
+
+Attach with ``Field(json_schema_extra=ENVIRONMENTAL)``. Such fields are excluded
+from the config hash — see `config_hash` for why that distinction matters.
+Fields are behavioural by default, so a new setting affects the hash unless it
+explicitly opts out."""
 
 ENV_PREFIX = "NEUROTRADE_"
 
@@ -111,8 +122,13 @@ class Settings(BaseSettings):
     )
 
     profile: Profile
-    storage: StorageSettings
-    log_level: str = "INFO"
+
+    storage: StorageSettings = Field(json_schema_extra=ENVIRONMENTAL)
+    """Where data lives on this machine. Environmental: moving the corpus to a
+    different disk changes nothing about what the system decides to trade."""
+
+    log_level: str = Field(default="INFO", json_schema_extra=ENVIRONMENTAL)
+    """How loudly to log. Environmental: verbosity cannot change a decision."""
 
     allow_live_orders: bool = Field(default=False)
     """Whether this process may place orders that move real money.
@@ -242,3 +258,77 @@ def describe(settings: Settings) -> str:
         else:
             lines.append(f"{name:<20} {value}")
     return "\n".join(lines)
+
+
+def _canonical(value: object) -> object:
+    """Reduce a value to something `json.dumps` renders identically everywhere.
+
+    Paths become strings, enums become their values, sets become sorted lists.
+    Without this, a `PosixPath` on this Mac and a `WindowsPath` on the rig would
+    serialise differently and produce different hashes for identical settings.
+    """
+    if isinstance(value, dict):
+        return {k: _canonical(v) for k, v in sorted(value.items())}
+    if isinstance(value, list | tuple):
+        return [_canonical(v) for v in value]
+    if isinstance(value, set | frozenset):
+        # key=repr because arbitrary objects are not mutually comparable, and an
+        # unordered set would otherwise hash differently run to run.
+        return sorted((_canonical(v) for v in value), key=repr)
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def behavioural_values(settings: Settings) -> dict[str, object]:
+    """The subset of settings that can change what the system decides.
+
+    Fields marked with `ENVIRONMENTAL` are omitted. Everything else is included,
+    because the safe default for a new setting is to affect the hash.
+
+    Example:
+        >>> sorted(behavioural_values(load_settings("research")))
+        ['allow_live_orders', 'profile']
+    """
+    dumped = settings.model_dump()
+    return {
+        name: _canonical(dumped[name])
+        for name, field in type(settings).model_fields.items()
+        if (field.json_schema_extra or {}) != ENVIRONMENTAL
+    }
+
+
+def config_hash(settings: Settings) -> str:
+    """Stable fingerprint of the settings that affect trading decisions.
+
+    §6.3 requires every order to carry this, so that a trade can be
+    reconstructed months later and checked against the configuration that
+    produced it. §10.3 requires it on every trade record for the same reason.
+
+    **Environmental settings are excluded on purpose.** Hashing `data_root`
+    would mean the same strategy running from an external NVMe produced a
+    different hash than one running from the internal disk — so the journal
+    would show a configuration change where none happened, and the hash would
+    stop being a signal that something meaningful moved.
+
+    Deterministic across processes and machines: canonical JSON with sorted
+    keys, hashed with BLAKE2b. Python's `hash()` is salted per process and
+    would give a different answer on every run.
+
+    Args:
+        settings: Resolved settings, normally from `load_settings`.
+
+    Returns:
+        A string like ``cfg_2f8a1c…``, 16 hex characters behind a prefix.
+
+    Example:
+        >>> config_hash(load_settings("research")) == config_hash(load_settings("research"))
+        True
+        >>> config_hash(load_settings("research")) != config_hash(load_settings("live"))
+        True
+    """
+    payload = json.dumps(behavioural_values(settings), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=32).hexdigest()[:16]
+    return f"cfg_{digest}"

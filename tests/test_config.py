@@ -7,6 +7,8 @@ becomes false, and nothing else would fail to reveal it.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,8 +16,11 @@ from pydantic import ValidationError
 
 from neurotrade.config import (
     DEFAULT_CONFIG_DIR,
+    ENVIRONMENTAL,
     Profile,
     Settings,
+    behavioural_values,
+    config_hash,
     describe,
     load_settings,
 )
@@ -193,3 +198,95 @@ def test_describe_renders_nested_values(config_dir: Path) -> None:
 def test_settings_cannot_be_built_without_required_values() -> None:
     with pytest.raises(ValidationError):
         Settings()
+
+
+# ── Config hash ──────────────────────────────────────────────
+
+
+def test_hash_is_stable_for_the_same_settings() -> None:
+    assert config_hash(load_settings(Profile.RESEARCH)) == config_hash(
+        load_settings(Profile.RESEARCH)
+    )
+
+
+def test_hash_is_stable_across_processes() -> None:
+    """Python salts hash() per process; BLAKE2b must not be affected.
+
+    A config hash that varied per run would make every journal entry
+    incomparable, which defeats the point of recording it (§6.3).
+    """
+    script = (
+        "from neurotrade.config import config_hash, load_settings;"
+        "print(config_hash(load_settings('research')))"
+    )
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).resolve().parents[1],
+            env={"PYTHONHASHSEED": seed, "PATH": "/usr/bin:/bin"},
+        ).stdout.strip()
+        for seed in ("0", "1", "random")
+    }
+    assert len(outputs) == 1, f"config hash varied across hash seeds: {outputs}"
+
+
+def test_different_profiles_hash_differently() -> None:
+    """A live process and a research process are not the same configuration."""
+    assert config_hash(load_settings(Profile.RESEARCH)) != config_hash(load_settings(Profile.LIVE))
+
+
+def test_behavioural_change_changes_the_hash(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = config_hash(load_settings(Profile.RESEARCH, config_dir=config_dir))
+    monkeypatch.setenv("NEUROTRADE_ALLOW_LIVE_ORDERS", "true")
+    after = config_hash(load_settings(Profile.RESEARCH, config_dir=config_dir))
+    assert before != after
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("NEUROTRADE_STORAGE__DATA_ROOT", "/Volumes/nvme/neurotrade"),
+        ("NEUROTRADE_LOG_LEVEL", "WARNING"),
+    ],
+)
+def test_environmental_change_does_not_change_the_hash(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    """The reason the split exists.
+
+    Moving the corpus to an external disk, or turning up logging, must not look
+    like a configuration change in the trade journal — otherwise the hash stops
+    being a signal that something meaningful moved.
+    """
+    before = config_hash(load_settings(Profile.RESEARCH, config_dir=config_dir))
+    monkeypatch.setenv(variable, value)
+    settings = load_settings(Profile.RESEARCH, config_dir=config_dir)
+    assert config_hash(settings) == before
+    # ...and the setting really did change, so this is not a vacuous assertion
+    assert value in str(settings.model_dump())
+
+
+def test_environmental_fields_are_excluded_from_the_hashed_payload() -> None:
+    included = set(behavioural_values(load_settings(Profile.RESEARCH)))
+    assert included == {"profile", "allow_live_orders"}
+
+
+def test_new_fields_are_hashed_unless_they_opt_out() -> None:
+    """The safe default: a setting affects the hash unless declared environmental."""
+    marked = {
+        name
+        for name, field in Settings.model_fields.items()
+        if (field.json_schema_extra or {}) == ENVIRONMENTAL
+    }
+    assert marked == {"storage", "log_level"}
+
+
+def test_hash_is_readable_in_a_log_line() -> None:
+    digest = config_hash(load_settings(Profile.RESEARCH))
+    assert digest.startswith("cfg_")
+    assert len(digest) == 20
