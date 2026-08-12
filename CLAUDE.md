@@ -156,6 +156,35 @@ why. Breadth-first scaffolding fails that test badly.
 - A commit that only adds config or only adds one module plus its tests is the right size. A commit
   that touches every layer is not.
 
+### Documentation standard
+
+Readers of this codebase will not all have trading experience. Domain jargon —
+microprice, R-multiple, LULD halt, maker/taker, triple barrier — gets a plain-English gloss the
+first time a module uses it. Assume the reader knows Python and does not know markets.
+
+**Required:**
+
+- **Every public function and method** gets a Google-style docstring: a one-line summary, then
+  `Args:` / `Returns:` / `Raises:` where any of them is non-obvious, then an `Example:` of 1–3 lines.
+- **Examples are doctests** (`>>>`), and pytest runs them. An example that drifts out of date fails
+  the build, which is the only way examples stay true.
+- **Every dataclass field** gets a one-line trailing comment giving its meaning and unit —
+  especially units, since `Nanos`, R-multiples and per-share versus total costs are easy to confuse.
+- **Non-obvious constants and module-level values** get a comment explaining the choice, not the value.
+- **Any code whose correctness is not self-evident** gets a comment on *why* — the failure it
+  prevents, the alternative rejected, the spec section it implements.
+
+**Not wanted** — these make the codebase harder to read, not easier:
+
+- Restating the signature in prose (`"""Returns the price."""` above `def price() -> Price`).
+- `Args:`/`Returns:` blocks on a single-argument accessor whose types already say everything.
+- Docstrings on `__str__`, `__repr__`, `__eq__` and similar dunder methods with standard semantics.
+- Line-by-line narration of code that reads plainly.
+- Repeating in a field comment what the field's type already states — say what it *means*, not what it is.
+
+The test: a comment earns its place if it tells the reader something the code cannot. Prefer one
+good sentence about why over three restating what.
+
 ### Conventions
 
 - Be terse in commit messages and prose; sacrifice grammar for concision.

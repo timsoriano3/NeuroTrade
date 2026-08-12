@@ -14,6 +14,18 @@ record plus its subsequent events — and lives in ``execution/``, not here.
 commission and slippage to be applied *inside* the backtest and recalibrated
 nightly from real fills, which is only possible if every fill records what was
 actually paid and what price we expected when we decided to trade.
+
+**Terms used here**, for readers coming from outside markets:
+
+- *Slippage* — the gap between the price you decided to trade at and the price
+  you actually got. Usually a cost, occasionally a gain, and almost always the
+  difference between a backtest that works and a live system that does not.
+- *Maker / taker* — a *maker* posts a resting order and waits, adding liquidity
+  to the book, and is typically charged less or paid a rebate. A *taker* crosses
+  the spread to execute immediately and pays for the privilege.
+- *Partial fill* — an order for 1,000 shares may execute as several smaller
+  trades at different prices. Each is a separate `Fill`.
+- *Commission* — the broker's per-trade charge, separate from slippage.
 """
 
 from __future__ import annotations
@@ -36,19 +48,29 @@ __all__ = [
 
 
 class OrderType(StrEnum):
-    """How the venue should treat the order's prices."""
+    """How the venue should treat the order's prices.
 
-    MARKET = "MARKET"
-    LIMIT = "LIMIT"
-    STOP = "STOP"
-    STOP_LIMIT = "STOP_LIMIT"
+    Each member declares which prices it requires, so `Order` validation is
+    derived from the enum rather than a hand-maintained matrix that can drift.
+
+    Example:
+        >>> OrderType.STOP_LIMIT.needs_limit_price, OrderType.STOP_LIMIT.needs_stop_price
+        (True, True)
+    """
+
+    MARKET = "MARKET"  # execute now at whatever the book offers
+    LIMIT = "LIMIT"  # execute only at limit_price or better; may never fill
+    STOP = "STOP"  # becomes a market order once price trades through stop_price
+    STOP_LIMIT = "STOP_LIMIT"  # becomes a limit order once stop_price is touched
 
     @property
     def needs_limit_price(self) -> bool:
+        """True if this type is meaningless without a `limit_price`."""
         return self in (OrderType.LIMIT, OrderType.STOP_LIMIT)
 
     @property
     def needs_stop_price(self) -> bool:
+        """True if this type is meaningless without a `stop_price`."""
         return self in (OrderType.STOP, OrderType.STOP_LIMIT)
 
 
@@ -58,15 +80,16 @@ class TimeInForce(StrEnum):
     DAY is the default for a day-trading system, and GTC is deliberately
     available but rare: an order surviving overnight contradicts the premise
     that positions are closed within the session.
+
+    Example:
+        >>> TimeInForce.DAY.value
+        'DAY'
     """
 
-    DAY = "DAY"
-    GTC = "GTC"
-    IOC = "IOC"
-    """Immediate-or-cancel. Fill what you can now, cancel the rest."""
-
-    FOK = "FOK"
-    """Fill-or-kill. All of it now, or none."""
+    DAY = "DAY"  # cancelled at the close if unfilled
+    GTC = "GTC"  # good till cancelled — survives overnight; rare here by design
+    IOC = "IOC"  # immediate-or-cancel: fill what you can now, cancel the rest
+    FOK = "FOK"  # fill-or-kill: all of it now, or none of it
 
 
 class LiquidityFlag(StrEnum):
@@ -75,11 +98,15 @@ class LiquidityFlag(StrEnum):
     Drives fee versus rebate, and is the measurement §5.9's adaptive limit
     placement optimises. A strategy whose fills are 90% TAKER is paying the
     spread every time, and that shows up here before it shows up in the P&L.
+
+    Example:
+        >>> LiquidityFlag.UNKNOWN.value
+        'UNKNOWN'
     """
 
-    MAKER = "MAKER"
-    TAKER = "TAKER"
-    UNKNOWN = "UNKNOWN"
+    MAKER = "MAKER"  # posted and waited — added liquidity, lower fee or a rebate
+    TAKER = "TAKER"  # crossed the spread — removed liquidity, pays the fee
+    UNKNOWN = "UNKNOWN"  # broker did not report; guessing would bias the cost model
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -92,18 +119,25 @@ class Order(Event):
     rather than by hoping the configuration was written down somewhere.
     """
 
-    id: OrderId
-    intent_id: IntentId
-    symbol: Symbol
-    side: Side
-    quantity: Quantity
-    order_type: OrderType
-    limit_price: Price | None = None
-    stop_price: Price | None = None
-    time_in_force: TimeInForce = TimeInForce.DAY
-    config_hash: str = ""
+    id: OrderId  # derived from intent_id + timestamp + attempt
+    intent_id: IntentId  # the proposal this order implements
+    symbol: Symbol  # instrument being traded
+    side: Side  # BUY or SELL — the action, not the resulting exposure
+    quantity: Quantity  # shares requested; never zero
+    order_type: OrderType  # determines which of the two prices below are required
+    limit_price: Price | None = None  # worst acceptable price; LIMIT and STOP_LIMIT only
+    stop_price: Price | None = None  # trigger level; STOP and STOP_LIMIT only
+    time_in_force: TimeInForce = TimeInForce.DAY  # how long it stays live
+    config_hash: str = ""  # hash of the config that produced it, for §6.3 reconstruction
 
     def __post_init__(self) -> None:
+        """Validate size and price/type consistency.
+
+        Raises:
+            ValueError: If quantity is zero, or if the prices present do not
+                match what `order_type` requires. A LIMIT order with no limit
+                price would be silently submitted as something else.
+        """
         Event.__post_init__(self)
         if self.quantity.is_zero:
             raise ValueError("an order must have non-zero quantity")
@@ -120,7 +154,13 @@ class Order(Event):
 
     @property
     def is_marketable(self) -> bool:
-        """True if this order can execute immediately without a price move."""
+        """True if this order can execute immediately without a price move.
+
+        A rough classification used to decide whether to expect a fill at all.
+        It will need refining once execution logic is real — a limit order
+        priced through the spread is also marketable, and that is not detectable
+        without the current book.
+        """
         return self.order_type in (OrderType.MARKET,) or self.time_in_force in (
             TimeInForce.IOC,
             TimeInForce.FOK,
@@ -138,18 +178,26 @@ class Fill(Event):
     measured from reality.
     """
 
-    id: FillId
-    order_id: OrderId
-    symbol: Symbol
-    side: Side
-    price: Price
-    quantity: Quantity
-    commission: Money
-    liquidity: LiquidityFlag = LiquidityFlag.UNKNOWN
-    reference_price: Price | None = None
-    broker_exec_id: str = ""
+    id: FillId  # derived from order_id + broker_exec_id, so re-sent reports collapse
+    order_id: OrderId  # the order this executed against
+    symbol: Symbol  # instrument traded
+    side: Side  # direction of this execution
+    price: Price  # what we actually paid or received, per share
+    quantity: Quantity  # shares in this execution; a partial fill is smaller than the order
+    commission: Money  # broker charge for this execution, in the instrument's currency
+    liquidity: LiquidityFlag = LiquidityFlag.UNKNOWN  # maker or taker, if reported
+    reference_price: Price | None = None  # price we decided against; None means unmeasured
+    broker_exec_id: str = ""  # the venue's own execution identifier
 
     def __post_init__(self) -> None:
+        """Validate size and currency.
+
+        Raises:
+            ValueError: If quantity is zero, or the commission currency differs
+                from the instrument's settlement currency — booking USD fees
+                against a TSX fill corrupts the equity curve in a way that looks
+                like a small persistent edge.
+        """
         Event.__post_init__(self)
         if self.quantity.is_zero:
             raise ValueError("a fill must have non-zero quantity")
@@ -161,17 +209,31 @@ class Fill(Event):
 
     @property
     def notional(self) -> Money:
-        """Value of the shares exchanged, before costs."""
+        """Cash value of the shares exchanged, before any costs.
+
+        Example:
+            >>> str(demo_fill.notional)               # 100 shares at 100.05
+            '10005.00 USD'
+        """
         return Money.of(self.price, self.quantity, self.symbol.currency)
 
     @property
     def slippage_per_share(self) -> Decimal | None:
         """Signed cost per share versus the decision price. Positive is worse.
 
-        A buy filled above the reference paid up; a sell filled below the
-        reference gave up edge. Both are positive here, so slippage always reads
-        as a cost regardless of direction. ``None`` when no reference was
-        recorded, which is honest — an unmeasured cost must not read as zero.
+        Multiplying by `side.sign` is what makes both directions read as costs:
+        a buy filled *above* the reference paid up, and a sell filled *below*
+        the reference gave up edge. Without the sign flip those two cancel, and
+        the nightly cost-model recalibration would conclude execution is free.
+
+        Returns:
+            Cost per share, positive when worse than the decision price and
+            negative on price improvement. `None` when no reference was
+            recorded — an unmeasured cost must not read as zero.
+
+        Example:
+            >>> demo_fill.slippage_per_share          # bought 0.05 above 100.00
+            Decimal('0.05')
         """
         if self.reference_price is None:
             return None
@@ -179,7 +241,16 @@ class Fill(Event):
 
     @property
     def slippage_cost(self) -> Money | None:
-        """Total slippage on this execution, in the instrument's currency."""
+        """Total slippage on this execution, in the instrument's currency.
+
+        Returns:
+            `slippage_per_share` scaled by the shares filled, or `None` if no
+            reference price was recorded.
+
+        Example:
+            >>> str(demo_fill.slippage_cost)          # 0.05 x 100 shares
+            '5.00 USD'
+        """
         per_share = self.slippage_per_share
         if per_share is None:
             return None
@@ -191,6 +262,13 @@ class Fill(Event):
 
         This is the quantity §3.3 requires a signal to beat, and the one the
         nightly cost-model recalibration fits against.
+
+        Returns:
+            Commission plus slippage, or `None` when slippage is unmeasurable.
+
+        Example:
+            >>> str(demo_fill.total_cost)             # 1.00 commission + 5.00 slippage
+            '6.00 USD'
         """
         slippage = self.slippage_cost
         if slippage is None:

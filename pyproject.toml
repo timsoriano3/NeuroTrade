@@ -60,7 +60,9 @@ warn_unreachable = true
 
 # ── Tests ────────────────────────────────────────────────────
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra --strict-markers --strict-config"
+# src is included so the `>>>` examples in docstrings run as tests. An example
+# nobody executes drifts out of date and then actively misleads.
+testpaths = ["tests", "src"]
+addopts = "-ra --strict-markers --strict-config --doctest-modules"
 # A warning in this system is usually a correctness signal, not noise.
 filterwarnings = ["error"]

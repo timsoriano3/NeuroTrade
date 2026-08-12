@@ -45,6 +45,25 @@ string forms of the fields we hash."""
 
 
 def _derive(prefix: str, parts: tuple[object, ...]) -> str:
+    """Hash the given parts into a prefixed identifier string.
+
+    Args:
+        prefix: Three-letter kind marker, e.g. `"int"`.
+        parts: The facts that make this thing unique. Each is stringified, so
+            every part must have a stable `__str__` — which is why `Symbol`
+            renders as `TICKER.VENUE` rather than a default object repr.
+
+    Returns:
+        A string of the form `"<prefix>_<16 hex chars>"`.
+
+    Raises:
+        ValueError: If `parts` is empty, which would give every record of that
+            kind the same identifier.
+
+    Example:
+        >>> _derive("int", ("a", "b")) == _derive("int", ("a", "b"))
+        True
+    """
     if not parts:
         raise ValueError("cannot derive an identifier from no parts")
     payload = _SEPARATOR.join(str(part).encode("utf-8") for part in parts)
@@ -61,11 +80,19 @@ class _DerivedId:
     catch, and with a bare ``str`` alias it could not.
     """
 
-    value: str
+    value: str  # the full "<prefix>_<digest>" string
 
-    PREFIX: ClassVar[str] = ""
+    PREFIX: ClassVar[str] = ""  # overridden per subclass; identifies the kind
 
     def __post_init__(self) -> None:
+        """Validate the shape of an identifier built from a raw string.
+
+        Raises:
+            ValueError: If the prefix is wrong or the length is not exactly
+                prefix plus digest. This is the runtime counterpart to the
+                static type distinction — it catches ids read back from storage
+                or from a broker message.
+        """
         expected = f"{self.PREFIX}_"
         if not self.value.startswith(expected):
             raise ValueError(f"{type(self).__name__} must start with {expected!r}: {self.value!r}")
@@ -74,6 +101,7 @@ class _DerivedId:
 
     @classmethod
     def _from_parts(cls, *parts: object) -> Self:
+        """Derive an identifier of this kind from its defining facts."""
         return cls(_derive(cls.PREFIX, parts))
 
     def __str__(self) -> str:
@@ -96,6 +124,26 @@ class IntentId(_DerivedId):
     def derive(
         cls, *, strategy: str, strategy_version: str, symbol: object, ts_event: int, seq: int
     ) -> Self:
+        """Derive the id for a strategy's proposal.
+
+        Args:
+            strategy: Registered plugin name, e.g. `"orb_stocks_in_play"`.
+            strategy_version: Semantic version of that plugin. Included so a
+                retuned strategy cannot be confused with its predecessor.
+            symbol: The instrument, normally a `Symbol`.
+            ts_event: Venue timestamp of the bar or tick that triggered it.
+            seq: Tiebreaker within that timestamp.
+
+        Returns:
+            A stable `IntentId` for exactly this proposal.
+
+        Example:
+            >>> IntentId.derive(
+            ...     strategy="orb", strategy_version="1.0.0",
+            ...     symbol="AAPL.NASDAQ", ts_event=1_773_495_000_000_000_000, seq=0,
+            ... )
+            IntentId(value='int_4a2256397fa1b828')
+        """
         return cls._from_parts(strategy, strategy_version, symbol, ts_event, seq)
 
 
@@ -113,6 +161,25 @@ class OrderId(_DerivedId):
 
     @classmethod
     def derive(cls, *, intent_id: IntentId, ts_event: int, attempt: int = 0) -> Self:
+        """Derive the id for an order placed against an intent.
+
+        Args:
+            intent_id: The proposal this order implements.
+            ts_event: When the order was created.
+            attempt: Which placement this is for that intent. Increment when
+                cancelling and re-placing, or the new order collides with the
+                one it replaces.
+
+        Returns:
+            A stable `OrderId`.
+
+        Example:
+            >>> intent = IntentId("int_1e0d31ab35f1caf1")
+            >>> first = OrderId.derive(intent_id=intent, ts_event=1, attempt=0)
+            >>> retry = OrderId.derive(intent_id=intent, ts_event=1, attempt=1)
+            >>> first == retry
+            False
+        """
         return cls._from_parts(intent_id, ts_event, attempt)
 
 
@@ -129,6 +196,28 @@ class FillId(_DerivedId):
 
     @classmethod
     def derive(cls, *, order_id: OrderId, broker_exec_id: str) -> Self:
+        """Derive the id for one execution report.
+
+        Args:
+            order_id: The order that executed.
+            broker_exec_id: The broker's execution identifier for this specific
+                partial or complete fill.
+
+        Returns:
+            A stable `FillId`, identical for a re-sent copy of the same report.
+
+        Raises:
+            ValueError: If `broker_exec_id` is empty. Without it two separate
+                partial fills of the same order would derive the same id and
+                one would be silently discarded.
+
+        Example:
+            >>> order = OrderId("ord_0123456789abcdef")
+            >>> a = FillId.derive(order_id=order, broker_exec_id="0000e0d5.01")
+            >>> b = FillId.derive(order_id=order, broker_exec_id="0000e0d5.01")
+            >>> a == b                               # re-sent report, one fill
+            True
+        """
         if not broker_exec_id:
             raise ValueError("broker_exec_id is required — it is what makes fills idempotent")
         return cls._from_parts(order_id, broker_exec_id)
