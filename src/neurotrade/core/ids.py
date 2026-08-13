@@ -31,6 +31,7 @@ __all__ = [
     "FillId",
     "IntentId",
     "OrderId",
+    "RunId",
 ]
 
 _DIGEST_CHARS = 16
@@ -221,3 +222,38 @@ class FillId(_DerivedId):
         if not broker_exec_id:
             raise ValueError("broker_exec_id is required — it is what makes fills idempotent")
         return cls._from_parts(order_id, broker_exec_id)
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class RunId(_DerivedId):
+    """Identifies one execution of the system — a session, a backtest, a replay.
+
+    Stamped on every log line so that a day's output can be separated from the
+    run before it. Derived from the configuration and the start time rather than
+    generated, which gives a property worth having: a replay driven by a
+    ``SimClock`` starts at the same instant every time, so it produces the same
+    run id, so two replays of one session yield byte-identical logs. A live run
+    starts at a wall-clock instant and is unique without trying.
+    """
+
+    PREFIX: ClassVar[str] = "run"
+
+    @classmethod
+    def derive(cls, *, config_hash: str, started_ns: int) -> Self:
+        """Derive the id for one run.
+
+        Args:
+            config_hash: Fingerprint of the configuration in force, from
+                `neurotrade.config.config_hash`. Two runs with different
+                settings are different runs even if they start together.
+            started_ns: Start time from the run's `Clock`. Wall clock live,
+                simulated time in replay — which is what makes replays repeat.
+
+        Returns:
+            A stable `RunId`.
+
+        Example:
+            >>> RunId.derive(config_hash="cfg_abc", started_ns=1_000)
+            RunId(value='run_70cb2f8ca1524537')
+        """
+        return cls._from_parts(config_hash, started_ns)
