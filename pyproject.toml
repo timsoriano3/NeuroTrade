@@ -11,7 +11,11 @@ dependencies = [
     "pydantic>=2.13.4",          # typed settings and validation
     "pydantic-settings>=2.15.0", # profile + environment layering
     "pyyaml>=6.0.3",             # profile files
+    "typer>=0.27.1",
 ]
+
+[project.scripts]
+neurotrade = "neurotrade.cli:app"
 
 [dependency-groups]
 dev = [
