@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from neurotrade.core.events import MarketSession
+from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.ids import FillId, IntentId, OrderId
 from neurotrade.core.intent import EntryTrigger, Intent
 from neurotrade.core.orders import Fill
@@ -104,7 +104,7 @@ def _doctest_namespace(doctest_namespace: dict[str, Any]) -> None:
     - `Decimal`
     - `Price`, `Quantity`, `Side`, `Symbol`, `Venue` — core value types
     - `AAPL` — `Symbol("AAPL", Venue.NASDAQ)`
-    - `MarketSession`
+    - `MarketSession`, `Bar`, `BarInterval`
     - `demo_intent` — the proposal described on `DEMO_INTENT` above
     - `demo_fill` — the execution described on `DEMO_FILL` above
     - `demo_round_trip` — the closed position described on `DEMO_ROUND_TRIP` above
@@ -119,6 +119,8 @@ def _doctest_namespace(doctest_namespace: dict[str, Any]) -> None:
         Symbol=Symbol,
         Venue=Venue,
         MarketSession=MarketSession,
+        Bar=Bar,
+        BarInterval=BarInterval,
         AAPL=AAPL,
         demo_intent=DEMO_INTENT,
         demo_fill=DEMO_FILL,

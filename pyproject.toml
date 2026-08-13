@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.14"
 # Every dependency is added by the commit that introduces the code needing it,
 # so `git log -p pyproject.toml` reads as a history of why each one is here.
 dependencies = [
+    "pyarrow>=25.0.1",
     "pydantic>=2.13.4",          # typed settings and validation
     "pydantic-settings>=2.15.0", # profile + environment layering
     "pyyaml>=6.0.3",             # profile files
@@ -68,6 +69,12 @@ strict = true
 # Teaches mypy about pydantic models: validates constructor calls and
 # enforces frozen-model assignment rules that are otherwise invisible.
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# pyarrow ships no py.typed marker. Declared once here rather than
+# suppressed at every import site.
+module = ["pyarrow.*"]
+ignore_missing_imports = true
 warn_unreachable = true
 
 # ── Tests ────────────────────────────────────────────────────
