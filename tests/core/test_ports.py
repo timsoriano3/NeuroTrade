@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterator, Sequence
+from datetime import date
 from pathlib import Path
 from typing import get_type_hints
 
@@ -65,7 +66,7 @@ class FakeStore:
     def __init__(self) -> None:
         self.bars: list[Bar] = []
 
-    def write_bars(self, bars: Sequence[Bar]) -> None:
+    def write_bars(self, bars: Sequence[Bar], *, source: str, session_date: date) -> None:
         self.bars.extend(bars)
 
     def read_bars(
@@ -199,7 +200,7 @@ def test_fake_store_round_trips_a_bar() -> None:
         close=Price("100.5"),
         volume=Quantity(10),
     )
-    store.write_bars([bar])
+    store.write_bars([bar], source="ibkr", session_date=date(2026, 3, 14))
     assert list(store.read_bars(AAPL, BarInterval.MIN_1, 0, 2_000)) == [bar]
     assert list(store.read_bars(AAPL, BarInterval.MIN_1, 2_000, 3_000)) == []
 

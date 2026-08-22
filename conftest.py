@@ -15,7 +15,9 @@ that depends on invisible state is worse than no example at all.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -105,6 +107,7 @@ def _doctest_namespace(doctest_namespace: dict[str, Any]) -> None:
     - `Price`, `Quantity`, `Side`, `Symbol`, `Venue` — core value types
     - `AAPL` — `Symbol("AAPL", Venue.NASDAQ)`
     - `MarketSession`, `Bar`, `BarInterval`
+    - `Path`, `date`
     - `demo_intent` — the proposal described on `DEMO_INTENT` above
     - `demo_fill` — the execution described on `DEMO_FILL` above
     - `demo_round_trip` — the closed position described on `DEMO_ROUND_TRIP` above
@@ -121,6 +124,8 @@ def _doctest_namespace(doctest_namespace: dict[str, Any]) -> None:
         MarketSession=MarketSession,
         Bar=Bar,
         BarInterval=BarInterval,
+        Path=Path,
+        date=date,
         AAPL=AAPL,
         demo_intent=DEMO_INTENT,
         demo_fill=DEMO_FILL,

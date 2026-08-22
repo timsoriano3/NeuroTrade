@@ -29,6 +29,7 @@ only holds for immediately-filled market orders.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from datetime import date
 from typing import Protocol, runtime_checkable
 
 from neurotrade.core.clock import Nanos
@@ -172,15 +173,15 @@ class StoragePort(Protocol):
 
     Example:
         >>> class InMemoryStore:
-        ...     def write_bars(self, bars): pass
+        ...     def write_bars(self, bars, *, source, session_date): pass
         ...     def read_bars(self, symbol, interval, start, end):
         ...         return iter(())
         >>> isinstance(InMemoryStore(), StoragePort)
         True
     """
 
-    def write_bars(self, bars: Sequence[Bar]) -> None:
-        """Append bars to the corpus.
+    def write_bars(self, bars: Sequence[Bar], *, source: str, session_date: date) -> None:
+        """Persist one session's bars.
 
         Implementations must be idempotent: the backfill crawler is resumable
         and will re-fetch ranges it already has after an interruption. Writing
@@ -188,7 +189,16 @@ class StoragePort(Protocol):
         computed from the corpus doubles.
 
         Args:
-            bars: Bars to persist. May span several symbols and dates.
+            bars: Bars to persist. May span symbols; all belong to one session.
+            source: Which feed produced them. Recorded per row, because sources
+                disagree — IEX-only data has partial volume, free samples have
+                gaps — and a volume feature is only interpretable if you know
+                which one a bar came from.
+            session_date: The trading day, in the venue's terms. Passed rather
+                than derived from `ts_event`: a US post-market bar at 19:30 ET
+                is 00:30 UTC the next day, so deriving would split one session
+                across two days. The caller has the venue calendar; storage
+                does not.
         """
         ...
 

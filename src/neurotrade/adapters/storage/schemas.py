@@ -38,6 +38,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.dataset as ds
 
 from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar, BarInterval
@@ -46,6 +47,7 @@ from neurotrade.core.types import Price, Quantity, Symbol, Venue
 __all__ = [
     "BAR_SCHEMA",
     "SCHEMA_VERSION",
+    "SESSION_PARTITIONING",
     "Source",
     "bar_to_row",
     "partition_path",
@@ -121,6 +123,22 @@ BAR_SCHEMA = pa.schema(
 Column order is fixed and meaningful: instrument, then time, then values, then
 provenance. Readers should select by name, but a stable order keeps diffs of
 `parquet-tools schema` output readable across versions."""
+
+SESSION_PARTITIONING = ds.partitioning(
+    pa.schema([pa.field("session_date", pa.date32())]), flavor="hive"
+)
+"""Partition spec for reading below the ticker level, with the date type stated.
+
+Stating it is not optional. Left to infer, Arrow reads `session_date=2026-03-14`
+from the directory name as a **string**, while the same column inside the file is
+`date32` — and the dataset then refuses to open at all:
+
+    ArrowTypeError: Unable to merge: Field session_date has incompatible types:
+    date32[day] vs string
+
+The column is deliberately stored in the file as well as in the path, so a
+single Parquet file is self-describing when read without its directory context.
+That redundancy is what makes the explicit type necessary."""
 
 PARTITION_KEYS = ("venue", "ticker", "session_date")
 """Directory levels, outermost first. Venue leads because it disambiguates the
