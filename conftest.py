@@ -31,6 +31,19 @@ from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
 
+#: A single one-minute AAPL bar, closing at 100.5. Injected as `a_bar`.
+A_BAR = Bar(
+    symbol=AAPL,
+    ts_event=1_000,
+    ts_init=1_000,
+    interval=BarInterval.MIN_1,
+    open=Price("100"),
+    high=Price("101"),
+    low=Price("99"),
+    close=Price("100.5"),
+    volume=Quantity(1_000),
+)
+
 #: A long AAPL proposal: enter at 100, stop at 99 (so 1R = 1.00), target 2R,
 #: one-hour time barrier. Injected as `demo_intent`.
 DEMO_INTENT = Intent(
@@ -108,6 +121,7 @@ def _doctest_namespace(doctest_namespace: dict[str, Any]) -> None:
     - `AAPL` — `Symbol("AAPL", Venue.NASDAQ)`
     - `MarketSession`, `Bar`, `BarInterval`
     - `Path`, `date`
+    - `a_bar` — the one-minute AAPL bar described on `A_BAR` above
     - `demo_intent` — the proposal described on `DEMO_INTENT` above
     - `demo_fill` — the execution described on `DEMO_FILL` above
     - `demo_round_trip` — the closed position described on `DEMO_ROUND_TRIP` above
@@ -126,6 +140,7 @@ def _doctest_namespace(doctest_namespace: dict[str, Any]) -> None:
         BarInterval=BarInterval,
         Path=Path,
         date=date,
+        a_bar=A_BAR,
         AAPL=AAPL,
         demo_intent=DEMO_INTENT,
         demo_fill=DEMO_FILL,
