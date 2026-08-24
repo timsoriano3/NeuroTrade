@@ -164,3 +164,28 @@ def test_exceptions_are_rendered_with_a_traceback() -> None:
     record = lines(stream)[0]
     assert record["level"] == "error"
     assert "broker rejected the order" in str(record.get("exception", ""))
+
+
+def test_logging_survives_stderr_being_replaced() -> None:
+    """structlog caches its logger, so binding `sys.stderr` at configure time
+    pins the stream that existed at startup.
+
+    Anything that later replaces stderr — log rotation, a supervisor reopening
+    descriptors, a test harness capturing output — would then leave every
+    subsequent line writing to a closed file. Found via the CLI, where two
+    successive invocations each get a fresh captured stream.
+    """
+    import contextlib
+
+    configure(load_settings(Profile.PAPER), SimClock(1_000))  # no explicit stream
+
+    first = io.StringIO()
+    with contextlib.redirect_stderr(first):
+        get_logger(__name__).info("before")
+    first.close()  # the stream logging was configured against is now gone
+
+    second = io.StringIO()
+    with contextlib.redirect_stderr(second):
+        get_logger(__name__).info("after")
+
+    assert "after" in second.getvalue()

@@ -99,6 +99,28 @@ class StorageSettings(BaseModel):
         """Recomputable artifacts. Safe to delete; rebuilt from `raw_dir`."""
         return self.data_root / "derived"
 
+    @property
+    def events_dir(self) -> Path:
+        """Session event logs, one file per session.
+
+        Neither raw nor derived: a log records what the system did, which cannot
+        be re-downloaded like `raw_dir` nor recomputed like `derived_dir`. It is
+        the audit trail §6.3 requires, so it is kept apart from both.
+        """
+        return self.data_root / "events"
+
+    def session_log(self, session: str) -> Path:
+        """Path to one session's event log.
+
+        Args:
+            session: The trading day as `YYYY-MM-DD`.
+
+        Example:
+            >>> StorageSettings(data_root=Path("/tmp/x")).session_log("2026-03-14")
+            PosixPath('/tmp/x/events/2026-03-14.jsonl')
+        """
+        return self.events_dir / f"{session}.jsonl"
+
 
 class Settings(BaseSettings):
     """Fully resolved configuration for one process.

@@ -20,6 +20,7 @@ from neurotrade.core.events import (
     BarInterval,
     Event,
     MarketSession,
+    Quote,
     SessionBoundary,
     TradingHalt,
 )
@@ -309,3 +310,77 @@ def test_a_shared_bus_is_not_reused_between_engines() -> None:
     # Both digests subscribed to the same bus; the second run feeds both.
     second.run(0, FOREVER)
     assert first.run(0, FOREVER).events_dispatched > 1
+
+
+# ── The committed fixture ────────────────────────────────────
+#
+# Everything above builds events in Python. These replay a real file, so they
+# exercise decode as well as dispatch — and the file stays fixed while the code
+# around it changes, which is what makes a digest regression visible.
+
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "session.jsonl"
+
+
+def replay_fixture() -> ReplayResult:
+    return ReplayEngine(EventStore(FIXTURE), SimClock(0)).run(0, 2**63 - 1)
+
+
+def test_the_fixture_replays_deterministically() -> None:
+    """Gate G1 against a recorded session on disk."""
+    assert replay_fixture().digest == replay_fixture().digest
+
+
+def test_the_fixture_digest_is_pinned() -> None:
+    """A change in encoding, ordering or event content moves this value.
+
+    Pinned deliberately. If a refactor changes it, that is the question worth
+    asking — either behaviour changed, or the fixture needs regenerating with
+    `scripts/make_replay_fixture.py` and the new digest recorded here.
+    """
+    assert replay_fixture().digest == "4f58fe2c99cd26dc7cbb8faf033a39d1"
+
+
+def test_the_fixture_holds_a_full_session() -> None:
+    result = replay_fixture()
+    assert result.events_read == 357
+    assert result.span_ns == 720 * 60_000_000_000  # pre-market through close
+
+
+def test_the_fixture_exercises_what_synthetic_data_does_not() -> None:
+    """Guards the fixture's own value.
+
+    A regenerated fixture that lost these properties would still replay
+    deterministically and would stop testing anything interesting.
+    """
+    events = list(EventStore(FIXTURE).stream(0, 2**63 - 1))
+    bars = [event for event in events if isinstance(event, Bar)]
+
+    assert {type(event).__name__ for event in events} >= {
+        "Bar",
+        "Quote",
+        "TickTrade",
+        "SessionBoundary",
+        "TradingHalt",
+        "TradingResumed",
+    }
+    # Real intrabar range on every bar, not a single-point ramp.
+    assert all(bar.high > bar.low for bar in bars)
+    # Optional fields present on some bars and absent on others.
+    assert any(bar.vwap is not None for bar in bars)
+    assert any(bar.vwap is None for bar in bars)
+    assert any(bar.trade_count is None for bar in bars)
+    # A ticker containing a dot, and an instrument settling in CAD.
+    tickers = {bar.symbol.ticker for bar in bars}
+    assert "BRK.B" in tickers
+    assert any(bar.symbol.currency.value == "CAD" for bar in bars)
+    # An illiquid minute really does have no volume.
+    assert any(bar.volume.is_zero for bar in bars)
+
+
+def test_the_fixture_contains_locked_and_crossed_books() -> None:
+    """Both occur in real consolidated data and must survive a round trip."""
+    quotes = [
+        event for event in EventStore(FIXTURE).stream(0, 2**63 - 1) if isinstance(event, Quote)
+    ]
+    assert any(quote.is_locked for quote in quotes)
+    assert any(quote.is_crossed for quote in quotes)

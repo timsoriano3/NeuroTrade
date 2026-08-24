@@ -42,6 +42,26 @@ __all__ = [
 ]
 
 
+class _CurrentStderr:
+    """Writes to whatever `sys.stderr` is at the moment of the call.
+
+    structlog binds its output stream when `configure` runs and caches a logger
+    holding that reference. Passing `sys.stderr` directly therefore pins the
+    stream that existed at startup — and anything that later replaces it (log
+    rotation, a supervisor reopening file descriptors, a test harness capturing
+    output) leaves every subsequent log line writing to a closed file. Resolving
+    it per write costs an attribute lookup and removes the failure mode.
+    """
+
+    __slots__ = ("__weakref__",)  # structlog takes a weak reference to the stream
+
+    def write(self, message: str) -> int:
+        return sys.stderr.write(message)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
+
+
 def _renderer(profile: Profile) -> Processor:
     """Pick the output format for a profile.
 
@@ -116,7 +136,7 @@ def configure(
         wrapper_class=structlog.make_filtering_bound_logger(
             logging.getLevelNamesMapping()[settings.log_level.upper()]
         ),
-        logger_factory=structlog.PrintLoggerFactory(stream or sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(stream or _CurrentStderr()),  # type: ignore[arg-type]
         cache_logger_on_first_use=True,
     )
 

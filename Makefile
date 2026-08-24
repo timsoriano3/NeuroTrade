@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -88,6 +88,26 @@ PROFILE ?= research
 
 show-config: ## Print the resolved config and its hash. PROFILE=research|paper|live
 	$(PY) neurotrade --profile $(PROFILE) config show
+
+# LOG replays a file directly; SESSION looks under the configured data root.
+# LOG defaults to the committed fixture, so `make replay` works on a fresh clone
+# even though nothing writes session logs until the live engine lands.
+LOG ?= tests/fixtures/session.jsonl
+
+replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
+	@if [ -n "$(SESSION)" ]; then \
+	   $(PY) neurotrade --profile $(PROFILE) replay --session $(SESSION); \
+	 else \
+	   $(PY) neurotrade --profile $(PROFILE) replay --log $(LOG); \
+	 fi
+
+verify-replay: ## Prove gate G1: replay twice, compare digests. SESSION= or LOG=
+	@if [ -n "$(SESSION)" ]; then target="-s $(SESSION)"; else target="-l $(LOG)"; fi; \
+	 first=$$($(PY) neurotrade --profile $(PROFILE) replay $$target 2>/dev/null); \
+	 second=$$($(PY) neurotrade --profile $(PROFILE) replay $$target 2>/dev/null); \
+	 echo "  run 1: $$first"; echo "  run 2: $$second"; \
+	 if [ "$$first" = "$$second" ]; then echo '  ✓ deterministic'; \
+	 else echo '  ✗ DIGESTS DIFFER — replay is not deterministic'; exit 1; fi
 
 # ── Housekeeping ─────────────────────────────────────────────
 clean: ## Remove build and tool caches. Never touches data/.

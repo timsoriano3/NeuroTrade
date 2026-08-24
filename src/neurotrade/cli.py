@@ -18,19 +18,27 @@ as ``git --no-pager log``::
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from neurotrade import __version__
+from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.config import Profile, Settings, config_hash, describe, load_settings
-from neurotrade.core.clock import LiveClock
+from neurotrade.core.clock import LiveClock, SimClock
 from neurotrade.core.ids import RunId
+from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
 
 __all__ = ["app"]
 
 log = get_logger(__name__)
+
+_FOREVER_NS = 2**63 - 1
+"""Upper bound for a whole-session replay. The log holds one session, so the
+range is only there to satisfy the port; bounding it by date would mean the CLI
+needing a venue calendar to know when the session ended."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +129,79 @@ def config_hash_command(ctx: typer.Context) -> None:
     """
     app_context: AppContext = ctx.obj
     typer.echo(config_hash(app_context.settings))
+
+
+@app.command()
+def replay(
+    ctx: typer.Context,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", "-s", help="Trading day to replay, as YYYY-MM-DD."),
+    ] = None,
+    log_path: Annotated[
+        Path | None,
+        typer.Option("--log", "-l", help="Replay a specific log file instead."),
+    ] = None,
+) -> None:
+    """Replay a recorded session and print its digest.
+
+    The digest is a hash of every event dispatched, in order. Running this twice
+    on the same log must print the same value — that is gate G1, and it is what
+    makes "did that change alter behaviour?" answerable without reading logs.
+
+    Give either `--session`, which looks under the configured data root, or
+    `--log`, which takes a path directly. The second exists because a log worth
+    replaying does not always live where this machine keeps its own: a shadow
+    run, a session copied off the trading host, or the test fixture.
+
+    The digest goes to stdout alone so it can be compared directly; the summary
+    goes to stderr, which is why piping this gives one clean line.
+
+    Example:
+        $ neurotrade replay --session 2026-03-16
+        $ neurotrade replay --log tests/fixtures/session.jsonl
+    """
+    app_context: AppContext = ctx.obj
+    storage = app_context.settings.storage
+
+    if (session is None) == (log_path is None):
+        typer.echo("give exactly one of --session or --log", err=True)
+        raise typer.Exit(code=2)
+
+    path = log_path if log_path is not None else storage.session_log(str(session))
+
+    if not path.exists():
+        typer.echo(f"no recorded session at {path}", err=True)
+        available = sorted(p.stem for p in storage.events_dir.glob("*.jsonl"))
+        if available:
+            typer.echo(f"recorded sessions: {', '.join(available)}", err=True)
+        else:
+            typer.echo(
+                f"nothing recorded under {storage.events_dir} yet — "
+                f"sessions are written by the live engine, which is Phase 3. "
+                f"To try this now: --log tests/fixtures/session.jsonl",
+                err=True,
+            )
+        raise typer.Exit(code=1)
+
+    # A fresh SimClock per replay: its start seeds nothing here, but sharing one
+    # across runs would let the first run's end position offset the second.
+    result = ReplayEngine(EventStore(path), SimClock(0)).run(0, _FOREVER_NS)
+
+    log.info(
+        "replay_complete",
+        source=str(path),
+        digest=result.digest,
+        events_read=result.events_read,
+        events_dispatched=result.events_dispatched,
+    )
+
+    typer.echo(f"source    {path}", err=True)
+    typer.echo(
+        f"events    {result.events_read} read, {result.events_dispatched} dispatched", err=True
+    )
+    typer.echo(f"span      {result.span_ns / 60_000_000_000:.0f} minutes", err=True)
+    typer.echo(result.digest)
 
 
 if __name__ == "__main__":
