@@ -44,8 +44,8 @@ Single test: `uv run pytest tests/path/test_x.py::test_name -x`
 external systems sit behind ports in `core/ports.py`. Every market event, signal, intent, order and
 fill is an append-only record, so any session replays bit-for-bit.
 
-**Layering is enforced by import-linter in CI, not convention.** Adding an import that violates this
-fails the build:
+**Layering is enforced by import-linter, not convention.** The contracts live in `.importlinter`
+and run as part of `make lint`, so an import that violates this fails before it reaches CI:
 
 ```
 core/        depends on nothing

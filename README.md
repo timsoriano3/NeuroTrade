@@ -78,8 +78,8 @@ config/         profile files
 ```
 
 Layers may only depend downward — `core` knows nothing about storage, brokers or
-strategies. A test enforces that for `core` today; the repo-wide check lands with
-the rest of Phase 0.
+strategies. This is checked automatically on every commit, not left to
+discipline: `make lint` fails if any layer reaches somewhere it should not.
 
 ## Documentation
 

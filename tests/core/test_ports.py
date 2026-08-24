@@ -127,9 +127,11 @@ def test_a_class_missing_a_method_does_not_satisfy_the_port() -> None:
 def test_core_imports_no_adapter() -> None:
     """`core/` sits at the bottom of the dependency graph (§18).
 
-    import-linter enforces this across the whole repo in CI; this catches the
-    specific case that would make the hexagon meaningless — core reaching into
-    an adapter — at test time.
+    Deliberately redundant with the `core-is-the-bottom` contract in
+    `.importlinter`. Two mechanisms guard the single rule the hexagon rests on:
+    this one reads the source and fails during `make test` with a message naming
+    the offending module, the contract walks the import graph and fails during
+    `make lint`. Either alone would be enough; the duplication costs one test.
     """
     core = Path(__file__).resolve().parents[2] / "src" / "neurotrade" / "core"
     offenders: dict[str, list[str]] = {}

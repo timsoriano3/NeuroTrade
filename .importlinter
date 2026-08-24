@@ -1,0 +1,104 @@
+# Layer contracts, enforced in CI.
+#
+# §18 makes dependency direction the discipline that gives a monorepo its
+# modularity, and says explicitly that it is enforced by a linter rather than by
+# convention. This is that linter.
+#
+# Contracts are written as `forbidden` rather than as one big `layers` contract
+# on purpose: each one states a specific rule and carries the reason it exists,
+# so a failure tells you what was violated and why it matters, not just that
+# some edge appeared in a graph.
+#
+# Layers not yet built — risk, ml, execution, discovery, promotion — get their
+# contracts when they get their code. Writing them now would mean maintaining
+# rules about modules that do not exist.
+
+[importlinter]
+root_package = neurotrade
+include_external_packages = False
+
+[importlinter:contract:core-is-the-bottom]
+name = core depends on nothing else in the repo
+type = forbidden
+source_modules =
+    neurotrade.core
+forbidden_modules =
+    neurotrade.adapters
+    neurotrade.features
+    neurotrade.strategies
+    neurotrade.lab
+    neurotrade.bus
+    neurotrade.config
+    neurotrade.logs
+    neurotrade.cli
+# The whole hexagon rests on this. core knows nothing about storage, brokers,
+# configuration or the command line, which is what lets the trading logic be
+# tested with no network, no database and no files.
+
+[importlinter:contract:adapters-do-not-reach-upward]
+name = adapters depend only on core
+type = forbidden
+source_modules =
+    neurotrade.adapters
+forbidden_modules =
+    neurotrade.features
+    neurotrade.strategies
+    neurotrade.lab
+    neurotrade.cli
+# An adapter that imported a strategy would make the storage layer depend on
+# what is being traded, and swapping a broker would stop being a local change.
+
+[importlinter:contract:features-depend-only-on-core]
+name = features depend only on core
+type = forbidden
+source_modules =
+    neurotrade.features
+forbidden_modules =
+    neurotrade.adapters
+    neurotrade.strategies
+    neurotrade.lab
+    neurotrade.cli
+# A feature reaching into storage could read data the point-in-time rules were
+# meant to withhold, which is the exact hole those rules exist to close.
+
+[importlinter:contract:strategies-depend-on-core-and-features]
+name = strategies depend only on core and features
+type = forbidden
+source_modules =
+    neurotrade.strategies
+forbidden_modules =
+    neurotrade.adapters
+    neurotrade.lab
+    neurotrade.cli
+# A strategy that could reach an adapter could reach a broker, and place an
+# order without passing the risk engine.
+
+[importlinter:contract:lab-uses-ports-not-adapters]
+name = lab depends on ports, never on a concrete adapter
+type = forbidden
+source_modules =
+    neurotrade.lab
+forbidden_modules =
+    neurotrade.adapters
+    neurotrade.cli
+# This is the contract that moved the event codec into core. The replay engine
+# needs a canonical encoding of events; reaching into adapters/storage for it
+# would have tied research to one storage backend. A shared need between two
+# layers belongs below both.
+
+[importlinter:contract:the-bus-is-infrastructure]
+name = the event bus depends only on core
+type = forbidden
+source_modules =
+    neurotrade.bus
+forbidden_modules =
+    neurotrade.adapters
+    neurotrade.features
+    neurotrade.strategies
+    neurotrade.lab
+    neurotrade.config
+    neurotrade.logs
+    neurotrade.cli
+# Everything above core publishes to the bus, so the bus must sit beneath all of
+# it. A bus that knew about strategies could not be reused by the shadow
+# environment or by a test.

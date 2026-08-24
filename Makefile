@@ -53,6 +53,7 @@ py-fmt:
 py-lint:
 	$(PY) ruff format --check src tests
 	$(PY) ruff check src tests
+	@if [ -f .importlinter ]; then $(PY) lint-imports; else echo 'import-linter: no contracts'; fi
 
 py-typecheck:
 	$(PY) mypy
