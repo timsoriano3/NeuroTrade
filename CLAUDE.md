@@ -12,8 +12,11 @@ strategy arsenal, ML stack, validation methodology, data plan, phased roadmap an
 Read the relevant section before implementing anything in that area. This file covers only what
 `TRADER_PLAN.md` does not: how to work in the repo.
 
-**Status: Phase 0 (foundation & data spine).** Much of what follows describes the contract Phase 0
-establishes, not code that exists yet.
+**Status: Phase 0 (foundation & data spine).** Built so far: the domain model, configuration and
+logging, the plugin registries, Parquet/DuckDB corpus storage, the event log, the event bus, and the
+replay engine — gate G1 is cleared. Not built: strategies, models, the risk engine, the broker
+connection, the dashboard. Sections below describing those state the contract they will meet, not
+code that exists.
 
 ## Commands
 
@@ -21,19 +24,18 @@ establishes, not code that exists yet.
 
 Go and TypeScript targets exist but report SKIP until `api/` and `ui/` have code (Phase 3).
 
-```
-make doctor       # report which toolchains are present
-make setup        # install dependencies for every present toolchain
-make check        # lint + typecheck + tests — run before declaring work done
-make test / lint / typecheck / fmt
-make up / down    # docker compose stack (postgres+timescale, redis, crawler)
+Only targets that exist are listed. Operational commands arrive with their
+subsystems — do not document one before it works.
 
-make crawl                 # start the IBKR backfill crawler
-make crawl-status          # coverage %, ETA, pacing headroom
-make replay SESSION=<date> # deterministic session replay; prints run digest
-make data-audit            # corpus quality gate
-make ibkr-check            # IBKR connection health probe
-make paper-smoke           # paper order round-trip
+```
+make doctor         # which toolchains are present
+make setup          # install dependencies
+make check          # lint + typecheck + tests — run before declaring work done
+make test / lint / typecheck / fmt
+make docs-check     # the docs still describe the code; part of `make lint`
+make show-config    # resolved settings and their hash. PROFILE=research|paper|live
+make replay         # replay a session, print its digest. LOG= or SESSION=
+make verify-replay  # gate G1: replay twice, compare digests
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`
@@ -63,6 +65,10 @@ ui/     (TS) generated OpenAPI types only
 
 `discovery/` being import-isolated is what physically prevents experimental logic from reaching live
 capital. Never add an import into it.
+
+Modules at the package root — `bus.py`, `config.py`, `logs.py`, `cli.py` — are infrastructure rather
+than domain layers. They may depend on `core`; `bus.py` depends on nothing else, because everything
+above it publishes to it.
 
 **Polyglot boundaries.** Python is the trading system (single `neurotrade` package under `src/`).
 Go is `api/` — the REST + WebSocket gateway, its own module, talks to Python only via Redis Streams.
@@ -184,6 +190,12 @@ first time a module uses it. Assume the reader knows Python and does not know ma
 
 The test: a comment earns its place if it tells the reader something the code cannot. Prefer one
 good sentence about why over three restating what.
+
+**Keep the READMEs in step.** Moving or renaming a module means updating the README that lists it,
+and adding a package means giving it one. `make docs-check` catches the mechanical cases — a named
+file that no longer exists, a documented `make` target that was never added, a package with no
+README, a broken link — and runs as part of `make lint`. It cannot check whether a sentence is still
+true, so that part is on you.
 
 ### Conventions
 

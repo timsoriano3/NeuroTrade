@@ -31,12 +31,14 @@ results stop being claims about the system that actually trades.
 
 **A session must replay exactly.** Feed yesterday's recorded data back in and the
 system must make the identical decisions, down to the byte. That is the only way
-to tell whether a change improved things or just moved them.
+to tell whether a change improved things or just moved them. This one already
+works — `make verify-replay` replays a recorded session twice and compares.
 
 ## What exists today
 
-The foundations — the vocabulary the rest of the system is written in, and the
-storage it runs on. 645 tests.
+The foundations — the vocabulary the rest of the system is written in, the
+storage it runs on, and the machinery that proves a session replays exactly.
+710 tests.
 
 | Area | What it does |
 |---|---|
@@ -47,6 +49,8 @@ storage it runs on. 645 tests.
 | **Plugin registries** | Strategies and calculations register themselves by name and version, so two versions can run side by side for comparison |
 | **Corpus storage** | Market data on disk as Parquet, queried with DuckDB, with tools to find what is missing |
 | **Event log** | An append-only record of everything that happened, which a session can be replayed from |
+| **Event bus** | Delivers events to whatever is listening, in a fixed order — the reason two runs behave identically |
+| **Replay** | Re-runs a recorded session and proves it behaved the same, by hashing everything that happened |
 
 Deliberately not built yet: strategies, models, the risk engine, the broker
 connection, and the dashboard. Those are Phases 2 onward.
@@ -73,9 +77,18 @@ src/neurotrade/
   adapters/     storage, and later the broker and data feeds
   features/     calculations shared by research and live
   strategies/   one module per strategy
+  lab/          measuring a strategy honestly; replay lives here
+  bus.py        delivers events to subscribers
   config.py     environment profiles
+  logs.py       structured logging
+  cli.py        the `neurotrade` command
 config/         profile files
+scripts/        one-off tools, not part of the package
+tests/fixtures/ a recorded session, replayed by CI
 ```
+
+Each folder has its own README explaining what is in it and the rules that apply
+there.
 
 Layers may only depend downward — `core` knows nothing about storage, brokers or
 strategies. This is checked automatically on every commit, not left to

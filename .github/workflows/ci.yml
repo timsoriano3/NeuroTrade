@@ -51,6 +51,9 @@ jobs:
       - name: Lint
         run: make py-lint
 
+      - name: Docs
+        run: make docs-check
+
       - name: Typecheck
         run: make py-typecheck
 

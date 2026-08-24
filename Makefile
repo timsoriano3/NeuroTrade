@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -41,9 +41,16 @@ check: lint typecheck test ## Full gate — run before declaring work done
 	@echo '✓ check passed'
 
 fmt: py-fmt go-fmt ts-fmt                ## Format every language
-lint: py-lint go-lint ts-lint            ## Lint every language
+lint: py-lint go-lint ts-lint docs-check ## Lint every language and the docs
 typecheck: py-typecheck ts-typecheck     ## Typecheck every language
 test: py-test go-test ts-test            ## Test every language
+
+# ── Documentation ────────────────────────────────────────────
+# Docs drift because nothing fails when they go stale. This checks the parts
+# that are mechanically verifiable: files a README names, `make` targets a doc
+# claims, packages missing a README, and links between documents.
+docs-check: ## Check the docs still describe the code
+	$(PY) python scripts/check_docs.py
 
 # ── Python ───────────────────────────────────────────────────
 py-fmt:

@@ -15,6 +15,7 @@ goodwill.
 | `clock.py` | The single source of time. Real in production, simulated in replay |
 | `events.py` | What the market did: bars, quotes, trade prints, session changes, halts |
 | `ids.py` | Identifiers, derived from content so a replay reproduces them |
+| `codec.py` | Turning events into text and back, without losing precision |
 | `intent.py` | What a strategy proposes: a side and where the idea is wrong |
 | `orders.py` | What we sent to the broker, and what came back |
 | `position.py` | What the fills add up to — size, cost basis, profit and loss |
@@ -28,6 +29,10 @@ in the rest — why money is exact, and why nothing reads the system clock.
 
 Then `events.py` for what comes in, `intent.py` → `orders.py` → `position.py`
 for what goes out, and `ports.py` for the boundary between the two.
+
+`codec.py` sits here rather than beside the storage code that writes it, because
+the research lab needs the same encoding to compute replay digests — and a
+shared need between two layers belongs below both.
 
 ## Rules that apply here
 

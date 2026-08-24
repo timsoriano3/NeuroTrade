@@ -21,8 +21,11 @@ reading every byte of it.
 | `schemas.py` | The on-disk column layout, and converting bars to rows and back |
 | `parquet_store.py` | Reads and writes the corpus. Writes are idempotent |
 | `duckdb_catalog.py` | Questions *about* the corpus: what is held, what is missing |
-|  `core/codec.py` | (moved to `core/codec.py`) |
 | `event_store.py` | The append-only session log |
+
+Events are turned into text by `core/codec.py`, not here. It lives in `core`
+because the research lab needs it too, and a layer may not reach into an adapter
+— see the `lab-uses-ports-not-adapters` contract in `.importlinter`.
 
 ## Two decisions worth knowing
 

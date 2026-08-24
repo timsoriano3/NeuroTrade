@@ -25,6 +25,17 @@ most:
 Where a test protects against a specific mistake, its docstring says which
 mistake. That is usually more useful than the assertion.
 
+## Fixtures
+
+`fixtures/session.jsonl` is a recorded session, committed so CI replays a real
+file rather than objects built in the same process. It deliberately contains the
+awkward cases synthetic data lacks — a ticker with a dot in it, sub-penny prices,
+a zero-volume minute, locked and crossed quotes, an irregular gap from a halt.
+
+Rebuild it with `uv run python scripts/make_replay_fixture.py`. Its digest is
+pinned in `lab/test_replay.py`, so regenerating it fails that test until the new
+value is recorded — which is the point.
+
 ## Fakes, not mocks
 
 Ports are small enough that in-memory implementations are a few lines each — see
