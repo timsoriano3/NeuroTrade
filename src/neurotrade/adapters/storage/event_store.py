@@ -36,8 +36,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Self
 
-from neurotrade.adapters.storage.event_codec import codec
 from neurotrade.core.clock import Nanos
+from neurotrade.core.codec import codec
 from neurotrade.core.events import Event
 
 __all__ = ["CorruptEventLog", "EventStore"]

@@ -14,8 +14,8 @@ from decimal import Decimal
 
 import pytest
 
-from neurotrade.adapters.storage import event_codec
-from neurotrade.adapters.storage.event_codec import (
+from neurotrade.core import codec as codec_module
+from neurotrade.core.codec import (
     CODEC_VERSION,
     UnknownEventType,
     codec,
@@ -284,14 +284,14 @@ def test_a_different_codec_version_is_refused() -> None:
 
 
 def test_registering_a_duplicate_tag_is_refused() -> None:
-    private = event_codec.EventCodec()
+    private = codec_module.EventCodec()
     private.register("bar", Bar, lambda e: {}, lambda d: a_bar())
     with pytest.raises(ValueError, match="already registered"):
         private.register("bar", Quote, lambda e: {}, lambda d: a_bar())
 
 
 def test_registering_a_type_twice_is_refused() -> None:
-    private = event_codec.EventCodec()
+    private = codec_module.EventCodec()
     private.register("bar", Bar, lambda e: {}, lambda d: a_bar())
     with pytest.raises(ValueError, match="already has a codec"):
         private.register("bar2", Bar, lambda e: {}, lambda d: a_bar())

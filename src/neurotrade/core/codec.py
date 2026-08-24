@@ -182,7 +182,7 @@ class EventCodec:
         entry = self._by_type.get(type(event))
         if entry is None:
             raise UnknownEventType(
-                f"{type(event).__name__} has no codec; register one in event_codec.py"
+                f"{type(event).__name__} has no codec; register one in core/codec.py"
             )
         return {_TYPE_KEY: entry.tag, "v": CODEC_VERSION, **entry.encode(event)}
 
