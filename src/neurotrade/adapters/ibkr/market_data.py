@@ -1,0 +1,323 @@
+"""Historical bars from IBKR, converted into domain events.
+
+Three things here are not obvious, and each was verified against a live Gateway
+rather than taken from documentation.
+
+**IBKR stamps a bar at its OPEN; we stamp at its CLOSE.** A 390-bar US regular
+session comes back running 13:30 to 19:59 UTC — the last bar is stamped at the
+open of the final minute, not at 20:00. `Bar.ts_event` is the moment a bar became
+an observable fact, so every timestamp gains one interval on the way in. Skip
+that and every strategy acts one bar early, on every bar, forever: a systematic
+lookahead that no test of the strategy itself would reveal.
+
+**Venue names differ.** NASDAQ, NYSE and ARCA pass through unchanged; TSX is
+`TSE` to IBKR. The mapping is explicit because a wrong exchange silently
+qualifies a *different listing* — the same ticker in another currency at another
+price.
+
+**Prices arrive as floats.** They go through `Price.from_float`, which routes via
+`repr` and is the marked boundary where precision was last trusted. Everything
+downstream is exact.
+
+Requests are paced (§12.1): IBKR permits about 60 historical requests per ten
+minutes, and exceeding it locks out further requests rather than returning a
+retryable error.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Protocol
+
+from ib_async import Stock
+
+from neurotrade.adapters.ibkr.connection import IbkrConnection
+from neurotrade.adapters.ibkr.pacing import HistoricalPacer
+from neurotrade.core.clock import Clock, Nanos, to_datetime
+from neurotrade.core.events import Bar, BarInterval
+from neurotrade.core.types import Price, Quantity, Symbol, Venue
+
+__all__ = ["IBKR_EXCHANGE", "IbkrMarketData", "MarketDataError"]
+
+logging.getLogger("ib_async").setLevel(logging.WARNING)
+
+IBKR_EXCHANGE: dict[Venue, str] = {
+    Venue.NASDAQ: "NASDAQ",
+    Venue.NYSE: "NYSE",
+    Venue.AMEX: "AMEX",
+    Venue.ARCA: "ARCA",
+    Venue.BATS: "BATS",
+    Venue.TSX: "TSE",  # IBKR's name for the Toronto Stock Exchange
+    Venue.TSXV: "VENTURE",  # and for TSX Venture
+}
+"""Our venue names to IBKR's. Mostly identity, which is exactly why the two
+exceptions are worth stating: a wrong exchange does not error, it qualifies a
+different listing of the same ticker."""
+
+_BAR_SIZE: dict[BarInterval, str] = {
+    BarInterval.SEC_1: "1 secs",
+    BarInterval.SEC_5: "5 secs",
+    BarInterval.SEC_15: "15 secs",
+    BarInterval.SEC_30: "30 secs",
+    BarInterval.MIN_1: "1 min",
+    BarInterval.MIN_5: "5 mins",
+    BarInterval.MIN_15: "15 mins",
+    BarInterval.MIN_30: "30 mins",
+    BarInterval.HOUR_1: "1 hour",
+    BarInterval.DAY_1: "1 day",
+}
+"""IBKR's bar size strings. Irregular — "1 secs", "5 mins", "1 hour" — so this is
+a table rather than a format string."""
+
+_SECONDS_PER_DAY = 86_400
+
+_MAX_DAYS: dict[BarInterval, int] = {
+    BarInterval.SEC_1: 1,
+    BarInterval.SEC_5: 7,
+    BarInterval.SEC_15: 14,
+    BarInterval.SEC_30: 28,
+    BarInterval.MIN_1: 30,
+    BarInterval.MIN_5: 100,
+    BarInterval.MIN_15: 365,
+    BarInterval.MIN_30: 365,
+    BarInterval.HOUR_1: 365,
+    BarInterval.DAY_1: 3_650,
+}
+"""How much history one request may cover, per bar size.
+
+Verified against a live Gateway rather than taken from the documentation: one
+minute bars return 390 for "1 D", 1,560 for "1 W" and 8,190 for "1 M"; daily
+bars return 2,512 for "10 Y". Asking for materially more does not error — the
+request simply never answers, and the caller sits through a timeout. Refusing
+immediately turns a sixty-second hang into an actionable message.
+
+Chunking a longer range is the crawler's job, not this adapter's: one call here
+is one request to IBKR, which is also what makes pacing countable."""
+
+
+class _BarData(Protocol):
+    """The fields we read off an `ib_async` historical bar."""
+
+    date: datetime  # the bar's OPEN, with formatDate=2
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    average: float  # VWAP over the bar
+    barCount: int  # trades in the bar
+
+
+class MarketDataError(RuntimeError):
+    """Raised when a request cannot be made or its answer cannot be trusted.
+
+    Distinct from "no data": an instrument that did not trade returns an empty
+    sequence, which is an ordinary outcome during a backfill, not a fault.
+    """
+
+
+class IbkrMarketData:
+    """Historical bars from IBKR. Satisfies `MarketDataPort`.
+
+    Example:
+        >>> from neurotrade.config import IbkrSettings
+        >>> from neurotrade.core.clock import LiveClock
+        >>> feed = IbkrMarketData(IbkrConnection(IbkrSettings()), LiveClock())
+        >>> feed.pacer.headroom > 0
+        True
+    """
+
+    __slots__ = ("_clock", "_connection", "_pacer", "_use_rth")
+
+    def __init__(
+        self,
+        connection: IbkrConnection,
+        clock: Clock,
+        *,
+        pacer: HistoricalPacer | None = None,
+        use_rth: bool = True,
+    ) -> None:
+        """Create the feed.
+
+        Args:
+            connection: An `IbkrConnection`. Opened on first use if needed.
+            clock: Drives pacing and stamps `ts_init`.
+            pacer: Rate limiter. A default one is built when omitted.
+            use_rth: Regular trading hours only. True by default because
+                extended-hours bars are thin and wide, and mixing them into a
+                session silently changes what a volume or range feature means.
+        """
+        self._connection = connection
+        self._clock = clock
+        self._pacer = pacer if pacer is not None else HistoricalPacer(clock)
+        self._use_rth = use_rth
+
+    @property
+    def pacer(self) -> HistoricalPacer:
+        """The rate limiter, exposed so a crawler can report headroom."""
+        return self._pacer
+
+    async def is_connected(self) -> bool:
+        """Whether the feed is usable right now.
+
+        Checked by §6.2's circuit breakers: a disconnected feed means stale
+        prices, and trading on stale prices is worse than not trading.
+        """
+        return self._connection.is_connected
+
+    async def fetch_bars(
+        self,
+        symbol: Symbol,
+        interval: BarInterval,
+        start: Nanos,
+        end: Nanos,
+    ) -> Sequence[Bar]:
+        """Fetch historical bars for one instrument.
+
+        Args:
+            symbol: Instrument to fetch.
+            interval: Bar size.
+            start: Inclusive lower bound on `ts_event` (bar close).
+            end: Exclusive upper bound on `ts_event`.
+
+        Returns:
+            Bars in ascending `ts_event` order, each stamped at its **close**.
+            Empty when the instrument did not trade in the range — a holiday, a
+            halt, or a listing that did not exist yet. That is an ordinary
+            outcome, not an error.
+
+        Raises:
+            MarketDataError: If the instrument cannot be resolved, the interval
+                is unsupported, or IBKR refuses the request.
+        """
+        if interval not in _BAR_SIZE:
+            raise MarketDataError(f"no IBKR bar size for {interval.value}")
+        if end <= start:
+            return ()
+
+        await self._connection.connect()
+        contract = await self._qualify(symbol)
+
+        # Built before pacing: a range we will refuse should not consume quota
+        # or make the caller wait for a request that is never sent.
+        duration = self._duration(interval, start, end)
+
+        wait = self._pacer.wait_seconds()
+        if wait > 0:
+            # Waiting is cheaper than a pacing violation, which locks historical
+            # requests out entirely rather than returning a retryable error.
+            await asyncio.sleep(wait)
+
+        self._pacer.record()
+        try:
+            raw = await self._connection.ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime=to_datetime(end),
+                durationStr=duration,
+                barSizeSetting=_BAR_SIZE[interval],
+                whatToShow="TRADES",
+                useRTH=self._use_rth,
+                formatDate=2,  # UTC-aware datetimes rather than local strings
+            )
+        except Exception as error:
+            raise MarketDataError(f"historical request failed for {symbol}: {error}") from error
+
+        received_at = self._clock.now_ns()
+        bars = [
+            self._to_bar(entry, symbol, interval, received_at) for entry in raw if entry is not None
+        ]
+        # IBKR returns whole bars overlapping the range, so trim to what was
+        # asked for rather than handing back bars outside it.
+        return tuple(bar for bar in bars if start <= bar.ts_event < end)
+
+    async def _qualify(self, symbol: Symbol) -> Stock:
+        """Resolve a `Symbol` into an IBKR contract.
+
+        Qualifying is not optional: an unqualified contract can match several
+        listings, and IBKR then picks one. Which one is not something to leave
+        to chance when the alternatives differ in currency and price.
+
+        Raises:
+            MarketDataError: If the instrument does not resolve, or resolves
+                ambiguously.
+        """
+        exchange = IBKR_EXCHANGE.get(symbol.venue)
+        if exchange is None:
+            raise MarketDataError(f"no IBKR exchange mapped for {symbol.venue.value}")
+
+        stock = Stock(
+            symbol.ticker,
+            "SMART",  # route through SMART, but pin the listing below
+            symbol.currency.value,
+            primaryExchange=exchange,
+        )
+        try:
+            qualified = await self._connection.ib.qualifyContractsAsync(stock)
+        except Exception as error:
+            raise MarketDataError(f"could not resolve {symbol}: {error}") from error
+
+        if not qualified:
+            raise MarketDataError(f"{symbol} did not resolve to any IBKR contract")
+        resolved: Stock = qualified[0]
+        return resolved
+
+    def _to_bar(
+        self,
+        entry: _BarData,
+        symbol: Symbol,
+        interval: BarInterval,
+        received_at: Nanos,
+    ) -> Bar:
+        """Convert one IBKR bar, shifting its timestamp to the close.
+
+        The shift is the important line. IBKR stamps a bar at its open; a
+        `Bar` is stamped at the moment it became observable, which is its close.
+        Storing IBKR's timestamp unchanged would let a strategy act on a bar one
+        interval before it finished forming.
+        """
+        opened_at = int(entry.date.replace(tzinfo=entry.date.tzinfo or UTC).timestamp())
+        close_ns = (opened_at * 1_000_000_000) + interval.nanos
+
+        return Bar(
+            symbol=symbol,
+            ts_event=close_ns,
+            ts_init=received_at,
+            interval=interval,
+            open=Price.from_float(entry.open),
+            high=Price.from_float(entry.high),
+            low=Price.from_float(entry.low),
+            close=Price.from_float(entry.close),
+            volume=Quantity.from_float(entry.volume),
+            # `average` is IBKR's VWAP for the bar; zero means it did not trade.
+            vwap=Price.from_float(entry.average) if entry.average > 0 else None,
+            trade_count=entry.barCount if entry.barCount >= 0 else None,
+        )
+
+    def _duration(self, interval: BarInterval, start: Nanos, end: Nanos) -> str:
+        """IBKR's duration string covering the requested range.
+
+        Whole days, rounded up: IBKR rejects durations outside its accepted
+        units, and asking for slightly more than needed is safe because the
+        result is trimmed to the range afterwards.
+
+        Raises:
+            MarketDataError: If the range exceeds what one request may cover.
+                IBKR does not reject an oversized request — it never answers it,
+                so the caller waits out a timeout and learns nothing. Naming the
+                limit and telling the caller to chunk is more useful.
+        """
+        seconds = (end - start) / 1_000_000_000
+        days = max(1, -(-int(seconds) // _SECONDS_PER_DAY))
+        limit = _MAX_DAYS[interval]
+        if days > limit:
+            raise MarketDataError(
+                f"{days} days of {interval.value} bars exceeds the {limit} day limit "
+                f"for one IBKR request; fetch it in chunks"
+            )
+        return f"{days} D"
+
+    def __repr__(self) -> str:
+        return f"IbkrMarketData({self._connection!r})"

@@ -12,8 +12,6 @@ proves the socket answered, and says nothing about *which* account answered.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from neurotrade.adapters.ibkr.connection import (
@@ -22,55 +20,7 @@ from neurotrade.adapters.ibkr.connection import (
     IbkrConnectionError,
 )
 from neurotrade.config import IbkrSettings, Profile, load_settings
-
-PAPER_ACCOUNT = "DUT108414"
-
-
-class FakeClient:
-    """Stands in for `ib_async.IB.client`."""
-
-    def __init__(self, server_version: int = 178) -> None:
-        self._server_version = server_version
-
-    def serverVersion(self) -> int:
-        return self._server_version
-
-
-class FakeIB:
-    """A fake `ib_async.IB`, matching only what the connection touches."""
-
-    def __init__(
-        self,
-        accounts: tuple[str, ...] = (PAPER_ACCOUNT,),
-        *,
-        fails_with: Exception | None = None,
-        hangs: bool = False,
-    ) -> None:
-        self.client: FakeClient = FakeClient()
-        self._accounts = accounts
-        self._connected = False
-        self._fails_with = fails_with
-        self._hangs = hangs
-        self.connect_calls = 0
-        self.disconnect_calls = 0
-
-    async def connectAsync(self, *args: object, **kwargs: object) -> None:
-        self.connect_calls += 1
-        if self._hangs:
-            await asyncio.sleep(60)
-        if self._fails_with is not None:
-            raise self._fails_with
-        self._connected = True
-
-    def isConnected(self) -> bool:
-        return self._connected
-
-    def disconnect(self) -> None:
-        self.disconnect_calls += 1
-        self._connected = False
-
-    def managedAccounts(self) -> list[str]:
-        return list(self._accounts)
+from tests.adapters.ibkr.conftest import PAPER_ACCOUNT, FakeIB
 
 
 def a_connection(

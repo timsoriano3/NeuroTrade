@@ -27,10 +27,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable
 from dataclasses import dataclass
+from datetime import datetime
 from types import TracebackType
-from typing import Protocol, Self, cast
+from typing import Any, Protocol, Self, cast
 
-from ib_async import IB
+from ib_async import IB, Contract
 
 from neurotrade.config import IbkrSettings
 
@@ -93,6 +94,19 @@ class IbkrClient(Protocol):
     def disconnect(self) -> object: ...
 
     def managedAccounts(self) -> list[str]: ...
+
+    def qualifyContractsAsync(self, *contracts: Contract) -> Awaitable[list[Any]]: ...
+
+    def reqHistoricalDataAsync(
+        self,
+        contract: Contract,
+        endDateTime: datetime | str | None,
+        durationStr: str,
+        barSizeSetting: str,
+        whatToShow: str,
+        useRTH: bool,
+        formatDate: int = ...,
+    ) -> Awaitable[list[Any]]: ...
 
 
 class IbkrConnectionError(RuntimeError):
@@ -196,6 +210,17 @@ class IbkrConnection:
         long-running process will see this go false during normal operation.
         """
         return bool(self._ib.isConnected())
+
+    @property
+    def ib(self) -> IbkrClient:
+        """The underlying client.
+
+        Exposed for adapters in this package that need calls beyond connection
+        management — the market data feed, and later the broker. Deliberately
+        not re-exported outside `adapters.ibkr`: the rest of the system talks to
+        ports, and a caller reaching this would be depending on `ib_async`.
+        """
+        return self._ib
 
     @property
     def settings(self) -> IbkrSettings:
