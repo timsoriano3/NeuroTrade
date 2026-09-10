@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay docs-check \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -101,6 +101,9 @@ show-config: ## Print the resolved config and its hash. PROFILE=research|paper|l
 # LOG defaults to the committed fixture, so `make replay` works on a fresh clone
 # even though nothing writes session logs until the live engine lands.
 LOG ?= tests/fixtures/session.jsonl
+
+ibkr-check: ## Probe IB Gateway: reachable, and the account we expect
+	$(PY) neurotrade --profile $(PROFILE) ibkr check
 
 replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
 	@if [ -n "$(SESSION)" ]; then \

@@ -17,6 +17,7 @@ as ``git --no-pager log``::
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -24,6 +25,7 @@ from typing import Annotated
 import typer
 
 from neurotrade import __version__
+from neurotrade.adapters.ibkr.connection import IbkrConnection, IbkrConnectionError
 from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.config import Profile, Settings, config_hash, describe, load_settings
 from neurotrade.core.clock import LiveClock, SimClock
@@ -63,6 +65,9 @@ app = typer.Typer(
 
 config_app = typer.Typer(help="Inspect resolved configuration.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
+
+ibkr_app = typer.Typer(help="Talk to Interactive Brokers.", no_args_is_help=True)
+app.add_typer(ibkr_app, name="ibkr")
 
 
 @app.callback()
@@ -202,6 +207,52 @@ def replay(
     )
     typer.echo(f"span      {result.span_ns / 60_000_000_000:.0f} minutes", err=True)
     typer.echo(result.digest)
+
+
+@ibkr_app.command("check")
+def ibkr_check(ctx: typer.Context) -> None:
+    """Check IB Gateway is reachable and is the account we expect.
+
+    Connecting proves less than it appears: the socket answers whether Gateway
+    is logged into paper or live. This reports *which* account answered and
+    whether the port dialled is a paper port, so a misconfiguration is visible
+    before an order is placed rather than after.
+
+    Exits non-zero when the connection is unusable or the account does not match
+    configuration.
+
+    Example:
+        $ neurotrade --profile paper ibkr check
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings.ibkr
+
+    async def run() -> None:
+        connection = IbkrConnection(settings)
+        try:
+            probe = await connection.probe()
+        finally:
+            connection.disconnect()
+
+        typer.echo(probe.describe(), err=True)
+        log.info(
+            "ibkr_probe",
+            host=settings.host,
+            port=settings.port,
+            accounts=list(probe.accounts),
+            server_version=probe.server_version,
+            healthy=probe.is_healthy,
+        )
+        if not probe.is_healthy:
+            typer.echo("unhealthy — see above", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(probe.account or ",".join(probe.accounts))
+
+    try:
+        asyncio.run(run())
+    except IbkrConnectionError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
 
 
 if __name__ == "__main__":

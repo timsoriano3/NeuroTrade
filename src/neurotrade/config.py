@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 __all__ = [
+    "IbkrSettings",
     "Profile",
     "Settings",
     "config_hash",
@@ -122,6 +123,40 @@ class StorageSettings(BaseModel):
         return self.events_dir / f"{session}.jsonl"
 
 
+class IbkrSettings(BaseModel):
+    """How to reach IB Gateway.
+
+    Ports differ by application and by mode, and getting one wrong connects to
+    the *other* account: 4001 is Gateway live, 4002 Gateway paper, 7496 TWS
+    live, 7497 TWS paper. The default here is the paper Gateway, so a
+    misconfiguration fails to connect rather than trading real money.
+
+    Example:
+        >>> IbkrSettings().port
+        4002
+    """
+
+    host: str = "127.0.0.1"  # Gateway runs beside us; never expose this port
+    port: int = 4002  # Gateway paper. 4001 is live — see the class docstring
+    client_id: int = 1  # distinct per connected process; two clients cannot share one
+    account: str = ""  # expected account, e.g. "DUT108414"; blank means do not check
+    timeout_seconds: float = 20.0  # Gateway can be slow to answer just after login
+
+    @property
+    def is_paper_port(self) -> bool:
+        """Whether this port is one of the two paper ports.
+
+        Used as a guard: a research or paper profile pointed at a live port is a
+        configuration error worth refusing rather than discovering by placing an
+        order.
+
+        Example:
+            >>> (IbkrSettings(port=4002).is_paper_port, IbkrSettings(port=4001).is_paper_port)
+            (True, False)
+        """
+        return self.port in (4002, 7497)
+
+
 class Settings(BaseSettings):
     """Fully resolved configuration for one process.
 
@@ -151,6 +186,11 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", json_schema_extra=ENVIRONMENTAL)
     """How loudly to log. Environmental: verbosity cannot change a decision."""
+
+    ibkr: IbkrSettings = Field(default_factory=IbkrSettings, json_schema_extra=ENVIRONMENTAL)
+    """Where the broker is. Environmental: which socket we dial does not change
+    what the system decides to trade, and hashing it would make a trade look
+    different for having been placed from a different machine."""
 
     allow_live_orders: bool = Field(default=False)
     """Whether this process may place orders that move real money.

@@ -9,6 +9,7 @@ requires-python = ">=3.12,<3.14"
 # so `git log -p pyproject.toml` reads as a history of why each one is here.
 dependencies = [
     "duckdb>=1.5.5",
+    "ib-async>=2.1.0",
     "pyarrow>=25.0.1",
     "pydantic>=2.13.4",          # typed settings and validation
     "pydantic-settings>=2.15.0", # profile + environment layering
@@ -28,6 +29,7 @@ dev = [
     "pre-commit>=4.6.1",
     "types-pyyaml",
     "import-linter>=2.13",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [build-system]
@@ -84,6 +86,15 @@ warn_unreachable = true
 # src is included so the `>>>` examples in docstrings run as tests. An example
 # nobody executes drifts out of date and then actively misleads.
 testpaths = ["tests", "src"]
-addopts = "-ra --strict-markers --strict-config --doctest-modules"
+# `not ibkr` by default: those tests need IB Gateway logged in, which CI does
+# not have and a laptop usually does not either. Run them with `-m ibkr`.
+addopts = "-ra --strict-markers --strict-config --doctest-modules -m 'not ibkr'"
+asyncio_mode = "auto"
+markers = [
+    # Requires IB Gateway running and logged in. Skipped unless explicitly
+    # selected, so the suite stays runnable on a laptop with nothing attached
+    # and in CI, which has no broker.
+    "ibkr: needs a live IB Gateway connection",
+]
 # A warning in this system is usually a correctness signal, not noise.
 filterwarnings = ["error"]

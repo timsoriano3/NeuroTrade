@@ -5,3 +5,11 @@
 # profile that proves nothing.
 
 log_level: INFO
+
+ibkr:
+  # Gateway paper port. 4001 is live — a wrong port here connects to the wrong
+  # account, and the failure is silent until an order is placed.
+  port: 4002
+  # Checked on every connection, so a Gateway logged into the wrong account is
+  # caught by `neurotrade ibkr check` rather than by a surprising fill.
+  account: DUT108414

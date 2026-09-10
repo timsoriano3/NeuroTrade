@@ -6,3 +6,13 @@
 
 log_level: INFO
 allow_live_orders: true
+
+ibkr:
+  # Gateway LIVE port. Stated explicitly because the default is 4002 (paper) —
+  # a live profile silently inheriting a paper port would connect to the wrong
+  # account and look like it worked.
+  port: 4001
+  # Deliberately blank until a live account exists. Blank disables the identity
+  # check, which is the right default for a profile nothing is allowed to use
+  # yet: allow_live_orders is the guard that matters here.
+  account: ""

@@ -183,7 +183,10 @@ def test_paper_and_live_differ_only_where_they_must() -> None:
     paper = load_settings(Profile.PAPER).model_dump()
     live = load_settings(Profile.LIVE).model_dump()
     differing = {k for k in paper if paper[k] != live[k]}
-    assert differing == {"profile", "allow_live_orders"}
+    # `ibkr` differs necessarily: the broker endpoint is a different port and a
+    # different account. Everything else must match, or paper stops being
+    # evidence about live.
+    assert differing == {"profile", "allow_live_orders", "ibkr"}
 
 
 # ── Rendering ────────────────────────────────────────────────
@@ -283,7 +286,7 @@ def test_new_fields_are_hashed_unless_they_opt_out() -> None:
         for name, field in Settings.model_fields.items()
         if (field.json_schema_extra or {}) == ENVIRONMENTAL
     }
-    assert marked == {"storage", "log_level"}
+    assert marked == {"storage", "log_level", "ibkr"}
 
 
 def test_hash_is_readable_in_a_log_line() -> None:
