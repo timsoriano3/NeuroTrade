@@ -192,7 +192,7 @@ def test_reading_before_anything_is_written(store: ParquetStore) -> None:
 
 
 def test_same_ticker_on_two_venues_stays_separate(store: ParquetStore) -> None:
-    """TD is Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ."""
+    """TD trades on TSE in CAD and on NYSE in USD — different prices."""
     store.write_bars(
         [bar(0, symbol=TD_TSX, close="80"), bar(0, symbol=TD_US, close="30")],
         source="ibkr",

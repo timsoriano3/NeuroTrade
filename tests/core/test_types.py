@@ -56,7 +56,7 @@ def test_symbol_str_is_venue_qualified() -> None:
 
 
 def test_same_ticker_on_two_venues_is_two_instruments() -> None:
-    """TD is Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ."""
+    """TD trades on TSE in CAD and on NYSE in USD — different prices."""
     assert Symbol("TD", Venue.TSX) != Symbol("TD", Venue.NASDAQ)
     assert Symbol("TD", Venue.TSX).currency is Currency.CAD
     assert Symbol("TD", Venue.NASDAQ).currency is Currency.USD

@@ -99,7 +99,7 @@ def test_coverage_spans_instruments_when_unfiltered(
 def test_coverage_separates_the_same_ticker_on_two_venues(
     corpus: tuple[ParquetStore, DuckDBCatalog],
 ) -> None:
-    """TD is Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ."""
+    """TD trades on TSE in CAD and on NYSE in USD — different prices."""
     store, catalog = corpus
     store.write_bars([bar(0, symbol=TD_TSX), bar(0, symbol=TD_US)], source="ibkr", session_date=MON)
     assert {entry.symbol for entry in catalog.coverage()} == {TD_TSX, TD_US}

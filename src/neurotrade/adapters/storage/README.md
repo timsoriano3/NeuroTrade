@@ -44,5 +44,5 @@ watchlist.
 raw/bars_1m/venue=NASDAQ/ticker=AAPL/session_date=2026-03-14/bars.parquet
 ```
 
-Venue comes first because tickers collide across countries: `TD` is
-Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ.
+Venue comes first because the same ticker trades on several venues: `TD` is
+Toronto-Dominion on both TSE (in CAD) and NYSE (in USD), at different prices.

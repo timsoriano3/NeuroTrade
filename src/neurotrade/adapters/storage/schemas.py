@@ -19,9 +19,9 @@ truncate every timestamp on a round trip. Raw int64 keeps `Nanos` exactly what
 it is in memory; `DuckDBCatalog` provides human-readable views for querying.
 
 **Partitioning is `venue / ticker / session_date`.** Venue comes first and is
-not optional: `TD` is Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ, and
-a layout keyed on ticker alone would merge two unrelated companies into one
-directory.
+not optional: `TD` trades on both TSE (in CAD) and NYSE (in USD) at different
+prices, so a layout keyed on ticker alone would write two currencies' worth of
+bars into one directory.
 
 **`session_date` is supplied, not derived.** It is tempting to take the UTC date
 from `ts_event`, and it is wrong: a US post-market bar at 19:30 ET is 00:30 UTC

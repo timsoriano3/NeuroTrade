@@ -158,9 +158,10 @@ class Venue(StrEnum):
 class Symbol:
     """A tradable instrument, qualified by listing venue.
 
-    The venue is not decoration. Tickers collide across countries — a bare "TD"
-    is Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ — so a universe
-    spanning both would otherwise merge two unrelated companies into one.
+    The venue is not decoration. The same ticker trades on several venues in
+    different currencies: "TD" is Toronto-Dominion on both TSE (in CAD) and NYSE
+    (in USD), at different prices. A universe keyed on ticker alone would merge
+    those into one series and average a CAD price with a USD one.
 
     Example:
         >>> str(Symbol("AAPL", Venue.NASDAQ))

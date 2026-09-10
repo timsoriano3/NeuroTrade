@@ -216,7 +216,7 @@ def test_partition_layout_is_venue_then_ticker_then_date() -> None:
 
 
 def test_the_same_ticker_on_two_venues_lands_in_different_partitions() -> None:
-    """TD is Toronto-Dominion on TSX and Tandem Diabetes on NASDAQ."""
+    """TD trades on TSE in CAD and on NYSE in USD — different prices."""
     root = Path("data/raw/bars_1m")
     canadian = partition_path(root, Symbol("TD", Venue.TSX), SESSION)
     american = partition_path(root, Symbol("TD", Venue.NASDAQ), SESSION)
