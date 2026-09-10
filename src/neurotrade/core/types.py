@@ -248,7 +248,12 @@ class Price:
         last trusted, which is exactly what makes those places auditable.
 
         Args:
-            value: A float from an external source.
+            value: A float from an external source. `numpy` scalars are
+                accepted: pandas hands back `np.float64`, which passes
+                `isinstance(x, float)` but whose `repr` is
+                `'np.float64(252.11)'` — unparseable as a decimal. Normalising
+                through `float()` first is what makes feed code work without
+                every caller remembering.
 
         Returns:
             The price matching the float's shortest round-tripping decimal form.
@@ -257,7 +262,7 @@ class Price:
             >>> Price.from_float(0.1).value          # not 0.1000000000000000055…
             Decimal('0.1')
         """
-        return cls(repr(value))
+        return cls(repr(float(value)))
 
     def __sub__(self, other: Price) -> Decimal:
         return self.value - other.value
@@ -309,7 +314,7 @@ class Quantity:
             >>> Quantity.from_float(1.5).value
             Decimal('1.5')
         """
-        return cls(repr(value))
+        return cls(repr(float(value)))
 
     @property
     def is_zero(self) -> bool:

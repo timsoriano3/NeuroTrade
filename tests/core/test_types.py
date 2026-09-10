@@ -208,3 +208,39 @@ def test_money_zero() -> None:
 def test_value_objects_are_frozen(obj: object, field: str) -> None:
     with pytest.raises(AttributeError):
         setattr(obj, field, "mutated")
+
+
+class _RepresentsItselfOddly(float):
+    """A float subclass whose `repr` is not a number.
+
+    Exactly what `numpy.float64` is: `repr(np.float64(252.11))` is the string
+    `'np.float64(252.11)'`. Reproduced here rather than importing numpy so the
+    guarantee is tested whether or not a pandas-based feed happens to be
+    installed — the property that matters is the shape, not the library.
+    """
+
+    def __repr__(self) -> str:
+        return f"np.float64({float(self)})"
+
+
+def test_from_float_handles_a_float_subclass_with_an_odd_repr() -> None:
+    """pandas hands back `np.float64`, and every feed goes through pandas.
+
+    It passes `isinstance(x, float)`, so it reaches `from_float` looking
+    ordinary, and then `repr()` produces something that is not a decimal at all.
+    Normalising through `float()` first is what stops every feed author
+    rediscovering this as a confusing crash deep in ingestion.
+    """
+    value = _RepresentsItselfOddly(252.11000061035156)
+    assert isinstance(value, float)  # the reason it slips past the float guard
+    assert "np.float64" in repr(value)  # and the reason repr() alone fails
+    assert Price.from_float(value).value == Decimal("252.11000061035156")
+    assert Quantity.from_float(_RepresentsItselfOddly(1.5)).value == Decimal("1.5")
+
+
+def test_from_float_accepts_a_numpy_scalar_when_numpy_is_present() -> None:
+    """The real thing, when a feed has brought numpy in."""
+    numpy = pytest.importorskip("numpy")
+    assert Price.from_float(numpy.float64(252.11000061035156)).value == Decimal(
+        "252.11000061035156"
+    )
