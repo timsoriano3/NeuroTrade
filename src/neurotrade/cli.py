@@ -25,11 +25,14 @@ from typing import Annotated
 import typer
 
 from neurotrade import __version__
+from neurotrade.adapters.ibkr.broker import IbkrBroker
 from neurotrade.adapters.ibkr.connection import IbkrConnection, IbkrConnectionError
 from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.config import Profile, Settings, config_hash, describe, load_settings
-from neurotrade.core.clock import LiveClock, SimClock
-from neurotrade.core.ids import RunId
+from neurotrade.core.clock import LiveClock, SimClock, to_datetime
+from neurotrade.core.ids import IntentId, OrderId, RunId
+from neurotrade.core.orders import Fill, Order, OrderType
+from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
 
@@ -253,6 +256,133 @@ def ibkr_check(ctx: typer.Context) -> None:
     except IbkrConnectionError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
+
+
+@ibkr_app.command("paper-smoke")
+def ibkr_paper_smoke(ctx: typer.Context) -> None:
+    """Gate G2: submit a paper order, see it acknowledged, cancel it.
+
+    Places a buy limit far below the market on a liquid name, so it cannot fill.
+    The point is to prove the order path works end to end — submission,
+    acknowledgement, cancellation — not to acquire a position.
+
+    Every event is written to the session log, so the run is replayable and the
+    order record carries the config hash that produced it (§6.3).
+
+    Refuses to run outside a paper port, which is the same structural guard the
+    broker applies.
+
+    Example:
+        $ neurotrade --profile paper ibkr paper-smoke
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+
+    if not settings.ibkr.is_paper_port:
+        typer.echo(
+            f"refusing: port {settings.ibkr.port} is a live port, and this places "
+            f"a real order there",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        connection = IbkrConnection(settings.ibkr)
+        clock = LiveClock()
+        log_path = settings.storage.session_log(to_datetime(clock.now_ns()).strftime("%Y-%m-%d"))
+        recorded: list[str] = []
+
+        with EventStore(log_path) as store:
+
+            def record(fill: Fill) -> None:
+                """A fill is unexpected here — the limit cannot trade — but if
+                one arrives it belongs in the log like any other event."""
+                store.append(fill)
+                recorded.append(fill.id.value)
+
+            broker = IbkrBroker(
+                connection,
+                clock,
+                allow_live_orders=settings.allow_live_orders,
+                on_fill=record,
+            )
+            order = _smoke_order(clock.now_ns(), config_hash(settings))
+            try:
+                await broker.submit(order)
+                store.append(order)
+                typer.echo(f"submitted  {order.id}", err=True)
+
+                status = await _await_status(
+                    broker, order.id, {"Submitted", "PreSubmitted", "Cancelled"}
+                )
+                typer.echo(f"status     {status}", err=True)
+                if status not in {"Submitted", "PreSubmitted"}:
+                    typer.echo("not acknowledged", err=True)
+                    raise typer.Exit(code=1)
+
+                await broker.cancel(order.id)
+                status = await _await_status(broker, order.id, {"Cancelled", "ApiCancelled"})
+                typer.echo(f"cancelled  {status}", err=True)
+            finally:
+                connection.disconnect()
+
+        typer.echo(f"recorded   {log_path}", err=True)
+        log.info(
+            "paper_smoke_complete",
+            order_id=order.id.value,
+            status=status,
+            fills=len(recorded),
+            log=str(log_path),
+        )
+        typer.echo(order.id.value)
+
+    try:
+        asyncio.run(run())
+    except IbkrConnectionError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+
+def _smoke_order(now: int, fingerprint: str) -> Order:
+    """One share of a liquid name, priced where it cannot fill."""
+    symbol = Symbol("AAPL", Venue.NASDAQ)
+    intent_id = IntentId.derive(
+        strategy="paper_smoke",
+        strategy_version="1.0.0",
+        symbol=symbol,
+        ts_event=now,
+        seq=0,
+    )
+    return Order(
+        id=OrderId.derive(intent_id=intent_id, ts_event=now),
+        intent_id=intent_id,
+        symbol=symbol,
+        ts_event=now,
+        ts_init=now,
+        side=Side.BUY,
+        quantity=Quantity(1),
+        order_type=OrderType.LIMIT,
+        limit_price=Price("1.00"),  # far below the market; cannot fill
+        config_hash=fingerprint,
+    )
+
+
+async def _await_status(
+    broker: IbkrBroker, order_id: OrderId, wanted: set[str], *, tries: int = 40
+) -> str:
+    """Poll until the order reaches one of `wanted`, or give up.
+
+    Polling is right here and wrong in the trading loop: this is a one-shot
+    probe with nothing else to do, where the live engine reacts to events.
+    """
+    trade = broker.working(order_id)
+    if trade is None:
+        return "unknown"
+    for _ in range(tries):
+        await asyncio.sleep(0.25)
+        if trade.orderStatus.status in wanted:
+            break
+    return trade.orderStatus.status
 
 
 if __name__ == "__main__":

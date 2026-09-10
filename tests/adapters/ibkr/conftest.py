@@ -12,6 +12,7 @@ and excluded by default.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -35,6 +36,58 @@ class FakeBarData:
     volume: float
     average: float  # VWAP; zero when the bar did not trade
     barCount: int
+
+
+@dataclass
+class FakeExecution:
+    """One execution report as IBKR sends it."""
+
+    execId: str
+    time: datetime
+    side: str  # "BOT" or "SLD", not BUY/SELL
+    shares: float
+    price: float
+    lastLiquidity: int = 2
+
+
+@dataclass
+class FakeCommissionReport:
+    """Commission as IBKR reports it, in the instrument's currency."""
+
+    commission: float
+    currency: str = "USD"
+
+
+@dataclass
+class FakeFill:
+    """An `ib_async` fill: an execution plus its commission."""
+
+    execution: FakeExecution
+    commissionReport: FakeCommissionReport
+
+
+class FakeEvent:
+    """Stands in for `ib_async`'s `fillEvent`, which uses `+=` to subscribe."""
+
+    def __init__(self) -> None:
+        self.handlers: list[Callable[[object, FakeFill], None]] = []
+
+    def __iadd__(self, handler: Callable[[object, FakeFill], None]) -> FakeEvent:
+        self.handlers.append(handler)
+        return self
+
+    def emit(self, fill: FakeFill) -> None:
+        """Deliver one execution to everything subscribed."""
+        for handler in self.handlers:
+            handler(self, fill)
+
+
+class FakeTrade:
+    """What `placeOrder` returns."""
+
+    def __init__(self, order: object) -> None:
+        self.order = order
+        self.fillEvent = FakeEvent()
 
 
 @dataclass
@@ -70,6 +123,7 @@ class FakeIB:
         bars: list[FakeBarData] | None = None,
         contracts: list[FakeContract] | None = None,
         historical_error: Exception | None = None,
+        place_error: Exception | None = None,
     ) -> None:
         self.client: FakeClient = FakeClient()
         self._accounts = accounts
@@ -83,6 +137,10 @@ class FakeIB:
         self.connect_calls = 0
         self.disconnect_calls = 0
         self.historical_calls: list[dict[str, Any]] = []
+        self.placed: list[Any] = []
+        self.cancelled: list[Any] = []
+        self.trades: list[FakeTrade] = []
+        self.place_error = place_error
 
     # ── Connection ───────────────────────────────────────────
 
@@ -114,6 +172,43 @@ class FakeIB:
         if self._historical_error is not None:
             raise self._historical_error
         return list(self._bars)
+
+    # ── Orders ───────────────────────────────────────────────
+
+    def placeOrder(self, contract: object, order: object) -> FakeTrade:
+        if self.place_error is not None:
+            raise self.place_error
+        self.placed.append(order)
+        trade = FakeTrade(order)
+        self.trades.append(trade)
+        return trade
+
+    def cancelOrder(self, order: object) -> None:
+        self.cancelled.append(order)
+
+
+def an_execution(
+    exec_id: str = "0000e0d5.68a1b2c3.01.01",
+    *,
+    side: str = "BOT",
+    shares: float = 100.0,
+    price: float = 315.93,
+    liquidity: int = 2,
+    commission: float = 1.05,
+    currency: str = "USD",
+) -> FakeFill:
+    """One filled execution, ready to emit through `fillEvent`."""
+    return FakeFill(
+        execution=FakeExecution(
+            execId=exec_id,
+            time=datetime(2026, 3, 16, 14, 0, tzinfo=UTC),
+            side=side,
+            shares=shares,
+            price=price,
+            lastLiquidity=liquidity,
+        ),
+        commissionReport=FakeCommissionReport(commission=commission, currency=currency),
+    )
 
 
 def a_bar(

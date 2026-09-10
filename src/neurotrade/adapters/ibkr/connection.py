@@ -97,6 +97,10 @@ class IbkrClient(Protocol):
 
     def qualifyContractsAsync(self, *contracts: Contract) -> Awaitable[list[Any]]: ...
 
+    def placeOrder(self, contract: Contract, order: object) -> object: ...
+
+    def cancelOrder(self, order: object) -> object: ...
+
     def reqHistoricalDataAsync(
         self,
         contract: Contract,
