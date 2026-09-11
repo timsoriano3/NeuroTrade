@@ -17,26 +17,28 @@ Both gates are **cleared**. The phase deliverable is **not** complete.
 
 ```
 src/neurotrade/
-  core/        types clock events ids intent orders position ports registry codec
+  core/        types clock events ids intent orders position ports registry codec calendar
   adapters/
     storage/   schemas parquet_store duckdb_catalog event_store
+    calendar/  venue_calendar
     ibkr/      connection market_data broker pacing
   features/    registry            (registry only — no features defined yet)
   strategies/  base                (contract only — no strategies defined yet)
   lab/         replay
   bus.py config.py logs.py cli.py
 ```
-~15.5k lines across `src`, `tests`, `scripts`, `config`. Tests sit beside every module.
+~16.2k lines across `src`, `tests`, `scripts`, `config`. Tests sit beside every module.
+
+The **trading calendar** is built in both halves and is **not in the spec at all** — §12.1 is
+silent on trading hours, holidays and half days, while `missing_sessions()` in `DuckDBCatalog`
+takes an expected-session list it had no source for, and `core/ports.py`, `cli.py`,
+`schemas.py` and `IbkrMarketData` all defer to "the venue calendar" in comments. Nothing wires
+it in yet. See `09-venue-calendar.doc.md`.
 
 ## Not built
 
 Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is Phase 1.
 
-- **Trading calendar** — sessions, holidays, half-days. **Not in the spec at all**, but every
-  other item below needs it: `missing_sessions()` in `DuckDBCatalog` takes an expected-session
-  list it has no source for, and `core/ports.py`, `cli.py`, `schemas.py` and
-  `IbkrMarketData` all defer to "the venue calendar" in comments. It blocks the rest, so it
-  comes first. §12.1 is silent on trading hours, holidays and half-days — this fills that gap.
 - **IBKR backfill crawler** (§12.1 stage 1, "week 1") — pacing-aware, resumable, runs
   continuously. The corpus is empty; `IbkrMarketData` fetches bars, but nothing walks the
   universe and fills `raw/`.

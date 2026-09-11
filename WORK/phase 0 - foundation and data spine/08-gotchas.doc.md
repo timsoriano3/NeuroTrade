@@ -25,6 +25,19 @@ A test asserts subclasses still validate.
 **`hash()` is salted per process.** Never derive an identifier from it — it breaks replay
 across runs. Everything id-like goes through BLAKE2b in `core/ids.py`.
 
+**A bar stamped at the session open belongs to the PREVIOUS session.**
+Because `ts_event` is the bar's close, a bar stamped 09:30 closed *at* the bell and covers the
+minute before it. The first bar of a US session closes at 09:31; the last closes at exactly
+16:00. Hence `TradingSession.holds_bar` is open-exclusive and close-inclusive, while
+`contains` (was the venue open at this instant?) is inclusive at both ends. Using one for the
+other shifts every session by a bar and corrupts the opening range.
+
+**An exchange calendar's default bounds move with today's date.**
+`exchange_calendars.get_calendar("XNYS")` covers twenty years back and one year forward *counted
+from now*, so the same query answers differently next week and a date beyond the horizon raises
+`DateOutOfBounds` rather than returning nothing. Always pass explicit `start`/`end`. Anything
+deriving a work queue from a moving horizon silently changes what "complete" means.
+
 ## Storage
 
 **Hive partition types are inferred, and inference disagrees with the file.**
@@ -63,6 +76,20 @@ always on. Gateway's API mode must be **IB API**, not FIX CTCI.
 `PrintLoggerFactory(sys.stderr)` binds the stream at import, so anything that later replaces
 `sys.stderr` (pytest's capture, a CLI runner) logs to a dead stream. Fix: a `_CurrentStderr`
 proxy that resolves `sys.stderr` per write. Needs `__slots__ = ("__weakref__",)`.
+
+## Tooling
+
+**ruff's ANN401 bans `typing.Any` in any signature.**
+Wrapping an untyped third-party object costs a real annotation, not `Any`. Name the library's own
+class (`xcals.ExchangeCalendar`, `pd.Timestamp`) — mypy still sees `Any` through
+`ignore_missing_imports`, but the signature documents what it is. Untyped packages also need an
+override block in `pyproject.toml` or strict mypy rejects the import.
+
+**The `ruff-on-edit` hook auto-fixes on an intermediate state.**
+Adding a name to `__all__` and its import in one edit, then defining the class in the next,
+loses the import: at the moment of the first edit nothing used it, so `ruff check --fix`
+deleted it as F401. Write a module's imports, `__all__` and definitions in **one** write, or
+add the imports last. The hook is right; the two-step edit is the mistake.
 
 ## Process — the expensive ones
 

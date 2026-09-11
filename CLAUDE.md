@@ -15,9 +15,11 @@ Read the relevant section before implementing anything in that area. This file c
 **Status: Phase 0 (foundation & data spine) — both exit gates cleared, deliverables incomplete.**
 Built: the domain model, configuration and logging, the plugin registries, Parquet/DuckDB corpus
 storage, the event log, the event bus, the replay engine (**gate G1**), and the IBKR adapter —
-connection, historical bars, pacing and broker (**gate G2**). Still open in Phase 0: the backfill
-crawler, the yfinance seed feed, the trading calendar, and the corpus quality gate — the corpus is
-empty. `features/` and `strategies/` hold their registry and contract but no actual features or
+connection, historical bars, pacing and broker (**gate G2**). Still open in Phase 0 (§12.1): the
+backfill crawler, free sample seed data, and yfinance daily bars plus universe history — the corpus
+is empty. The **trading calendar** they were blocked on is built, both halves —
+`core/calendar.py` with `CalendarPort`, and `adapters/calendar/` on `exchange_calendars` — though
+nothing calls it yet. The corpus quality gate is **Phase 1**, not Phase 0. `features/` and `strategies/` hold their registry and contract but no actual features or
 strategies. Not built at all: models, the risk engine, the dashboard. Sections below describing
 those state the contract they will meet, not code that exists.
 

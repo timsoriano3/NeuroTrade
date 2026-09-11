@@ -9,6 +9,7 @@ requires-python = ">=3.12,<3.14"
 # so `git log -p pyproject.toml` reads as a history of why each one is here.
 dependencies = [
     "duckdb>=1.5.5",
+    "exchange-calendars>=4.13.2",
     "ib-async>=2.1.0",
     "pyarrow>=25.0.1",
     "pydantic>=2.13.4",          # typed settings and validation
@@ -80,6 +81,13 @@ plugins = ["pydantic.mypy"]
 module = ["pyarrow.*"]
 ignore_missing_imports = true
 warn_unreachable = true
+
+[[tool.mypy.overrides]]
+# Neither ships a py.typed marker either. pandas appears only as the type of the
+# timestamps exchange_calendars hands back; nothing in this codebase computes
+# with it.
+module = ["exchange_calendars.*", "pandas.*"]
+ignore_missing_imports = true
 
 # ── Tests ────────────────────────────────────────────────────
 [tool.pytest.ini_options]

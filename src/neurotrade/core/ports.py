@@ -32,14 +32,16 @@ from collections.abc import Iterator, Sequence
 from datetime import date
 from typing import Protocol, runtime_checkable
 
+from neurotrade.core.calendar import TradingSession
 from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar, BarInterval, Event
 from neurotrade.core.ids import OrderId
 from neurotrade.core.orders import Order
-from neurotrade.core.types import Symbol
+from neurotrade.core.types import Symbol, Venue
 
 __all__ = [
     "BrokerPort",
+    "CalendarPort",
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
@@ -269,5 +271,64 @@ class EventStorePort(Protocol):
             Events ordered by `(ts_event, seq)` — the total order defined in
             `core.events`. Any other ordering, including one that merely looks
             sorted, breaks replay determinism.
+        """
+        ...
+
+
+@runtime_checkable
+class CalendarPort(Protocol):
+    """Which days a venue traded, and between which times.
+
+    Synchronous for the same reason `StoragePort` is: an exchange calendar is a
+    local computation over holiday rules, not a network round trip, and forcing
+    every research script into an event loop for it would buy nothing.
+
+    Venues disagree, which is the whole reason this takes a `Venue` rather than
+    being a single global calendar. TSX trades through US Thanksgiving; NYSE
+    trades through Canada Day. A crawler that assumes one calendar for both
+    countries reports phantom gaps on one venue and misses real ones on the
+    other.
+
+    **Implementations must be deterministic for a given library version.** Two
+    calls with the same arguments return the same sessions, and an upgrade that
+    would silently change history for a date already in the corpus is a defect —
+    pin the version and pin a fixture that fails the build if it moves.
+    """
+
+    def sessions(self, venue: Venue, start: date, end: date) -> tuple[date, ...]:
+        """Dates the venue traded within an inclusive range.
+
+        This is the crawler's work queue once differenced against what the
+        corpus holds — see `missing_sessions` on
+        `adapters.storage.duckdb_catalog.DuckDBCatalog`, which takes exactly
+        this list. It lives in an adapter, so joining the two is the caller's
+        job; `core/` cannot import it.
+
+        Args:
+            venue: Listing venue. `Venue.SMART` is an order route and must raise.
+            start: First date to consider, inclusive.
+            end: Last date to consider, inclusive.
+
+        Returns:
+            Session dates in ascending order. Empty when the venue never traded
+            in the range — a holiday week, or a range before the venue existed.
+            Weekends and holidays are absent, not present-and-empty.
+        """
+        ...
+
+    def session(self, venue: Venue, session_date: date) -> TradingSession | None:
+        """The bounds of one session, or `None` if the venue was closed.
+
+        `None` rather than an exception because "was the venue open?" is an
+        ordinary question with an ordinary negative answer, asked constantly by
+        the crawler. Reserving the exception for genuinely bad input — an
+        unsupported venue — keeps a holiday from looking like a fault.
+
+        Args:
+            venue: Listing venue.
+            session_date: The date to look up, in the venue's own terms.
+
+        Returns:
+            The session, or `None` if that date was not a trading day.
         """
         ...

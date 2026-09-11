@@ -74,7 +74,29 @@ closing and flipping through zero in a single fill. Provides `unrealised_pnl`, `
 `total_pnl`, `realised_r` (R-multiple: P&L divided by the risk originally taken, so a trade that
 made twice what it risked is `+2R` regardless of position size).
 
+## `calendar.py` — the shape of a trading day
+
+`TradingSession`: venue, session_date, `open_ns`, `close_ns`, `is_early_close`. Frozen, slotted.
+
+**Not in the spec.** §12.1 never defines trading hours, holidays or half days, but five modules
+defer to "the venue calendar" in comments and `missing_sessions` takes an expected-session list
+with no source. This is that missing piece, and it blocks the crawler.
+
+- `expected_bars(interval)` — derived from the session's own bounds, so half days and venue
+  differences come out right instead of being hardcoded as 390. This is the number
+  `Coverage.is_complete` has always wanted.
+- `contains(ts)` vs `holds_bar(ts)` — inclusive at both ends vs open-exclusive. See
+  `08-gotchas`; the asymmetry is a real bug class, not a nicety.
+- Half days are ordinary instances with a shorter span, not a special case to branch on.
+- Regular session only. Pre/post bounds wait until a feed actually delivers pre/post bars.
+- The adapter that supplies the facts is `adapters/calendar/` — see `09-venue-calendar.doc.md`.
+
 ## `ports.py` — the hexagon's edges
 
-`MarketDataPort` `BrokerPort` `StoragePort` `EventStorePort`, all `Protocol`s.
+`MarketDataPort` `BrokerPort` `StoragePort` `EventStorePort` `CalendarPort`, all `Protocol`s.
 Adapters implement them; the core never imports an adapter.
+
+`CalendarPort` is synchronous (a local computation over holiday rules, not a network round
+trip), takes a `Venue` because venues disagree — TSX trades through US Thanksgiving, NYSE
+through Canada Day — and returns `None` for a closed day rather than raising, because "was the
+venue open?" is an ordinary question with an ordinary negative answer.

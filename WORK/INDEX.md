@@ -16,9 +16,9 @@ Phase 0 exit gates, both verified:
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
 Phase 0 work still open (§12.1): the IBKR backfill crawler, free sample seed data, and yfinance
-daily bars plus universe history. A **trading calendar** is needed first and the spec does not
-mention one — see `00-status.doc.md`. The corpus quality gate is **Phase 1**, not Phase 0.
-Phase 0 is not finished — it is *unblocked*.
+daily bars plus universe history. The **trading calendar** they were blocked on is built, both
+halves — the spec never mentions one, see `09-venue-calendar.doc.md`. Nothing calls it yet. The
+corpus quality gate is **Phase 1**, not Phase 0. Phase 0 is not finished — it is *unblocked*.
 
 ## Phase 0 — foundation and data spine
 
@@ -32,6 +32,7 @@ Phase 0 is not finished — it is *unblocked*.
 | `05-bus-and-replay.doc.md` | `bus.py`, `lab/replay.py`, how G1 is proven | Anything determinism-related |
 | `06-ibkr-adapter.doc.md` | `connection`, `market_data`, `broker`, `pacing`, how G2 is proven | Touching the broker |
 | `07-tooling-ci-docs.doc.md` | Makefile, pre-commit, CI, import-linter, `docs-check` | Changing the build |
+| `09-venue-calendar.doc.md` | `core/calendar.py`, `adapters/calendar/`, why the spec has no calendar | Touching sessions or the crawler |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Non-obvious traps with their fixes | **Before writing code — highest value per token** |
 
 ## Conventions
