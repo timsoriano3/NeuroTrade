@@ -16,7 +16,7 @@ about adapters.
 | Folder | Status |
 |---|---|
 | `storage/` | Built. The market-data corpus and the event log |
-| `ibkr/` | Not built. Broker connection and historical backfill |
+| `ibkr/` | Built. Connection, historical bars, request pacing, order placement. The backfill crawler that drives it is still open |
 | `feeds/` | Not built. yfinance and the free sample sources |
 | `notify/` | Not built. Alerting |
 

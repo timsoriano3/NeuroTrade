@@ -7,8 +7,13 @@ Talks to Interactive Brokers through IB Gateway.
 | File | What it does |
 |---|---|
 | `connection.py` | Opens the connection and checks it is the account we meant |
+| `market_data.py` | Fetches historical bars and converts them to `Bar` events |
+| `pacing.py` | Keeps historical requests under IBKR's rate limit |
+| `broker.py` | Places and cancels orders; turns executions into `Fill` records |
 
-Market data and order placement land here next.
+The backfill crawler that drives `market_data.py` across a universe of symbols
+is not here yet — this layer fetches what it is asked for, nothing decides what
+to ask for.
 
 ## Connecting proves less than it looks
 
@@ -65,4 +70,8 @@ marked and excluded by default:
 
 ```bash
 uv run pytest -m ibkr     # opt in, with Gateway logged in
+make paper-smoke          # gate G2: submit a paper order, acknowledge, cancel
 ```
+
+`paper-smoke` is the end-to-end proof: the order it places is written to the
+event log with its config hash, and that log replays deterministically.

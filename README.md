@@ -12,8 +12,9 @@ It runs on one machine, trades through Interactive Brokers, and learns mainly
 from replaying years of historical data rather than from its own small number of
 live trades.
 
-**Status: Phase 0 of 8 — foundations.** Nothing trades yet. There is no
-strategy, no model, and no broker connection. See [What exists today](#what-exists-today).
+**Status: Phase 0 of 8 — foundations.** Nothing trades yet: there is no strategy
+and no model. The broker connection is built and a paper order round-trips, but
+there is nothing yet deciding what to send it. See [What exists today](#what-exists-today).
 
 Not financial advice.
 
@@ -37,8 +38,8 @@ works — `make verify-replay` replays a recorded session twice and compares.
 ## What exists today
 
 The foundations — the vocabulary the rest of the system is written in, the
-storage it runs on, and the machinery that proves a session replays exactly.
-710 tests.
+storage it runs on, the machinery that proves a session replays exactly, and the
+broker connection it trades through. 810 tests.
 
 | Area | What it does |
 |---|---|
@@ -51,9 +52,14 @@ storage it runs on, and the machinery that proves a session replays exactly.
 | **Event log** | An append-only record of everything that happened, which a session can be replayed from |
 | **Event bus** | Delivers events to whatever is listening, in a fixed order — the reason two runs behave identically |
 | **Replay** | Re-runs a recorded session and proves it behaved the same, by hashing everything that happened |
+| **Broker** | Connects to Interactive Brokers, pulls historical bars within their rate limits, and places orders — with a structural guard that refuses real ones outside the live profile |
 
-Deliberately not built yet: strategies, models, the risk engine, the broker
-connection, and the dashboard. Those are Phases 2 onward.
+Still to finish in Phase 0: the backfill crawler that fills the corpus, a free
+seed data feed, a trading calendar, and the quality gate that says the data is
+fit to research on. The corpus is currently empty.
+
+Deliberately not built yet: strategies, models, the risk engine and the
+dashboard. Those are Phases 2 onward.
 
 ## Getting started
 
@@ -74,7 +80,7 @@ TypeScript arrive in Phase 3 for the dashboard.
 ```
 src/neurotrade/
   core/         the domain model — depends on nothing else
-  adapters/     storage, and later the broker and data feeds
+  adapters/     storage and the IBKR broker; data feeds still to come
   features/     calculations shared by research and live
   strategies/   one module per strategy
   lab/          measuring a strategy honestly; replay lives here
