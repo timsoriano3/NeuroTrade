@@ -15,8 +15,10 @@ Phase 0 exit gates, both verified:
 - **G1** — a session replays bit-for-bit. `make verify-replay` → `4f58fe2c99cd26dc7cbb8faf033a39d1`
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
-Phase 0 work still open: IBKR backfill crawler, yfinance seed feed, trading calendar,
-corpus quality gate. Phase 0 is not finished — it is *unblocked*.
+Phase 0 work still open (§12.1): the IBKR backfill crawler, free sample seed data, and yfinance
+daily bars plus universe history. A **trading calendar** is needed first and the spec does not
+mention one — see `00-status.doc.md`. The corpus quality gate is **Phase 1**, not Phase 0.
+Phase 0 is not finished — it is *unblocked*.
 
 ## Phase 0 — foundation and data spine
 

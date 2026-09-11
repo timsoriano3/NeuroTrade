@@ -30,12 +30,25 @@ src/neurotrade/
 
 ## Not built
 
-- **Historical backfill crawler** — the corpus is empty; `IbkrMarketData` fetches bars, but
-  nothing walks the universe and fills `raw/`.
-- **yfinance seed feed** — the zero-cost bootstrap ahead of IBKR backfill.
-- **Trading calendar** — sessions, holidays, half-days. `missing_sessions()` in
-  `DuckDBCatalog` takes an expected-session list it currently has no source for.
-- **Corpus quality gate** — the pass/fail that says the data is fit to research on.
+Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is Phase 1.
+
+- **Trading calendar** — sessions, holidays, half-days. **Not in the spec at all**, but every
+  other item below needs it: `missing_sessions()` in `DuckDBCatalog` takes an expected-session
+  list it has no source for, and `core/ports.py`, `cli.py`, `schemas.py` and
+  `IbkrMarketData` all defer to "the venue calendar" in comments. It blocks the rest, so it
+  comes first. §12.1 is silent on trading hours, holidays and half-days — this fills that gap.
+- **IBKR backfill crawler** (§12.1 stage 1, "week 1") — pacing-aware, resumable, runs
+  continuously. The corpus is empty; `IbkrMarketData` fetches bars, but nothing walks the
+  universe and fills `raw/`.
+- **Free sample seed data** (§12.1 stage 2) — FirstRateData / Kibot samples, so the lab has
+  something to work with before the crawler has run.
+- **yfinance daily bars and universe history** (§12.1 stage 3) — including `.TO` tickers.
+
+Corpus target before Phase 5: 3–5 years of 1-minute bars across US + TSX, ~2,000 symbols,
+well under 100 GB compressed.
+
+**Not Phase 0:** the corpus quality gate (gap detection, split/dividend adjustment, halt
+marking, duplicate prints, survivorship audit) is §12.1 stage 5, timed **Phase 1, ongoing**.
 
 Nothing from Phase 1+ exists: no features, no strategies, no labelling, no CPCV, no cost
 model, no trial ledger, no risk engine, no execution engine, no `api/`, no `ui/`.
