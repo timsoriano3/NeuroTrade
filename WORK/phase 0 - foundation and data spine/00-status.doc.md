@@ -18,6 +18,7 @@ Both gates are **cleared**. The phase deliverable is **not** complete.
 ```
 src/neurotrade/
   core/        types clock events ids intent orders position ports registry codec calendar
+               universe
   adapters/
     storage/   schemas parquet_store duckdb_catalog event_store
     calendar/  venue_calendar

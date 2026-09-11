@@ -74,6 +74,7 @@ the timestamps the library hands back; nothing computes with it. Neither package
 ## Not done yet
 
 Nothing calls this. `sessions()` is the crawler's work queue once differenced against
-`missing_sessions`, and that wiring — plus a CLI command and a make target — is the next
-commit. Note the seam: `missing_sessions` takes `list[date]` while the port returns
+`missing_sessions` — but a work queue needs two axes, and the other one is the symbol list.
+`core/universe.py` is that second axis and landed first; the wiring itself, plus a CLI command
+and a make target, follows. Note the seam: `missing_sessions` takes `list[date]` while the port returns
 `tuple[date, ...]`, so one of the two needs widening when they are joined.
