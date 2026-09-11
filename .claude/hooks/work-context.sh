@@ -13,3 +13,9 @@ echo "<work-ledger>"
 echo "Project state from WORK/INDEX.md. Open a specific .doc.md only when the task needs it."
 cat "$idx"
 echo "</work-ledger>"
+
+# Model choice is the largest single cost lever and is invisible unless raised.
+# Kept to two lines because this text is re-read on every request of the session.
+echo "<model-discipline>"
+echo "Execution work (writing modules, wiring config, running gates, applying an agreed plan) belongs on sonnet. Opus is for design, ambiguous debugging and Phase 1 validation. If this session is execution, say so in your first reply and suggest /model sonnet."
+echo "</model-discipline>"

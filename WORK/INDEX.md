@@ -35,6 +35,11 @@ corpus quality gate is **Phase 1**, not Phase 0. Phase 0 is not finished — it 
 | `09-venue-calendar.doc.md` | `core/calendar.py`, `adapters/calendar/`, why the spec has no calendar | Touching sessions or the crawler |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Non-obvious traps with their fixes | **Before writing code — highest value per token** |
 
+## Why the working agreements exist
+
+`cost-and-delegation.doc.md` — the measurements behind the delegation, batching, model-tier and
+clearing rules in `CLAUDE.md`, and the hooks that enforce them. Read it before changing any of them.
+
 ## Conventions
 
 - `TRADER_PLAN.md` (gitignored) is the spec. **Grep for the section, `sed` that range — never read the whole file.**
