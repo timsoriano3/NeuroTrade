@@ -12,11 +12,41 @@ strategy arsenal, ML stack, validation methodology, data plan, phased roadmap an
 Read the relevant section before implementing anything in that area. This file covers only what
 `TRADER_PLAN.md` does not: how to work in the repo.
 
-**Status: Phase 0 (foundation & data spine).** Built so far: the domain model, configuration and
-logging, the plugin registries, Parquet/DuckDB corpus storage, the event log, the event bus, and the
-replay engine — gate G1 is cleared. Not built: strategies, models, the risk engine, the broker
-connection, the dashboard. Sections below describing those state the contract they will meet, not
-code that exists.
+**Status: Phase 0 (foundation & data spine) — both exit gates cleared, deliverables incomplete.**
+Built: the domain model, configuration and logging, the plugin registries, Parquet/DuckDB corpus
+storage, the event log, the event bus, the replay engine (**gate G1**), and the IBKR adapter —
+connection, historical bars, pacing and broker (**gate G2**). Still open in Phase 0: the backfill
+crawler, the yfinance seed feed, the trading calendar, and the corpus quality gate — the corpus is
+empty. `features/` and `strategies/` hold their registry and contract but no actual features or
+strategies. Not built at all: models, the risk engine, the dashboard. Sections below describing
+those state the contract they will meet, not code that exists.
+
+`WORK/INDEX.md` carries the current status; keep the two in step.
+
+## Session context — read this before exploring
+
+`WORK/` is the project's context ledger. It exists so a session can learn what has been built
+by reading ~40 lines instead of re-deriving it from 15k lines of source.
+
+- `WORK/INDEX.md` — the map. Injected automatically at session start by a hook.
+- `WORK/phase <#> - <title>/<subtitle>.doc.md` — one coherent subsystem per file.
+
+**Open only the doc the task needs.** `08-gotchas.doc.md` in each phase folder is the highest
+value per token in the repo — it is the list of bugs already paid for, and reading it before
+writing code is cheaper than rediscovering any one of them.
+
+`TRADER_PLAN.md` is the spec and is large. **Never read it whole.** Use the `plan-section`
+agent, or `grep -n` for the section heading and `sed -n 'A,Bp'` that range.
+
+### Checkpointing work
+
+When a coherent body of work is finished — a phase, a subsystem, a gate — say so, propose the
+exact `WORK/phase <#> - <title>/<subtitle>.doc.md` path, and recommend writing it and clearing
+context before continuing. Then wait; the user decides. A `Stop` hook raises this mechanically
+once enough has accumulated, but noticing earlier is better than being told.
+
+Use the `work-journal` skill to write it. Catching this *before* a compaction is the point —
+a compaction loses detail a doc would have preserved cheaply.
 
 ## Commands
 
@@ -36,6 +66,8 @@ make docs-check     # the docs still describe the code; part of `make lint`
 make show-config    # resolved settings and their hash. PROFILE=research|paper|live
 make replay         # replay a session, print its digest. LOG= or SESSION=
 make verify-replay  # gate G1: replay twice, compare digests
+make ibkr-check     # probe IB Gateway: reachable, and the account we expect
+make paper-smoke    # gate G2: submit a paper order, acknowledge, cancel
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`
@@ -105,6 +137,83 @@ These change how code must be written. Violating one is a defect even if tests p
   change to core.
 
 ## Working agreements
+
+### Delegation, batching and model tiers
+
+Agent use is **authorised standing policy for this project** — the user asked for it explicitly.
+Do not wait to be told again.
+
+#### Why this is a rule and not a preference
+
+Measured on this project: cache reads outnumbered output tokens **571 : 1**, making re-read of
+context roughly **69%** of spend and generated output about **6%**. Cost per request is
+proportional to context size, and **every tool call is a request**. So session cost is
+approximately `context size × number of requests`.
+
+Two consequences, both counter-intuitive:
+
+- A tool call that returns a lot is charged **twice** — once for the call, and again on every
+  later request, because its output now sits in context forever.
+- A subagent's context is discarded. Only its return value arrives here. Delegation is
+  therefore a **compression** mechanism, not merely a parallelism one.
+
+One session ran 744 main-loop tool calls and 0 delegated ones, and accounted for essentially a
+whole day's spend. That is the failure this section exists to prevent.
+
+#### Hard triggers — delegate, do not read
+
+| Trigger | Agent | Model |
+|---|---|---|
+| Any question about what the spec says | `plan-section` | haiku |
+| Any sweep for where code lives or what its surface is | `codebase-locator` | haiku |
+| Any test suite, lint or full build gate | `check-runner` | haiku |
+| Any question about how a library/SDK actually works | `library-researcher` | sonnet |
+| Writing tests for a module | `test-author` | sonnet |
+| Auditing a diff against the invariants above | `invariant-auditor` | sonnet |
+| Auditing a diff for documentation that went false | `docs-drift-auditor` | sonnet |
+| Reviewing validation methodology or statistics | `quant-methodology-reviewer` | **opus** |
+
+**Never read `TRADER_PLAN.md` inline.** It is large and consulted constantly, which makes it the
+single most expensive habit available. Use `plan-section`.
+
+**Never run `make check` (or `pytest` over a directory) inline.** Passing output is pure noise
+and failing output is long; both land in context permanently. Use `check-runner`.
+
+Run `invariant-auditor` and `docs-drift-auditor` before writing a commit handoff. They catch the
+two defect classes `make check` structurally cannot: a violated invariant passes tests, and a
+false sentence passes `docs-check`.
+
+Keep it inline when the answer is in a file already open, or when delegating would cost more
+round-trips than it saves. Don't delegate trivia.
+
+#### Batching
+
+**Independent tool calls go in one message.** N sequential calls are N full-context requests;
+the same N issued together are one. Before making a call, ask what else could be answered in the
+same breath — and issue those together.
+
+Sequencing is only justified when a later call genuinely needs an earlier result.
+
+#### Model tiers
+
+| Tier | For |
+|---|---|
+| haiku | mechanical, high-input/low-output, no judgement |
+| sonnet | bounded judgement against a clear rubric |
+| opus | reasoning where being wrong is expensive and silent |
+
+**The main loop is a tier choice too, and it dominates the bill.** Cache read is ~69% of spend,
+so the model running the conversation sets the rate on nearly all of it.
+
+- **Sonnet for execution sessions** — writing modules and docs, wiring config, running gates,
+  applying a plan that already exists. Roughly a fifth the cost at no useful loss.
+- **Opus for design, ambiguous debugging, and Phase 1 validation work** — CPCV, triple-barrier
+  labelling, deflated Sharpe, PBO, the trial ledger. §17 names backtest overfitting as the
+  primary risk and its failure mode is a *clean equity curve that is wrong*; that is worth the
+  expensive tier. Locating a file is not.
+
+Say which mode a session is in when it is ambiguous, and suggest `/model sonnet` when a stretch
+of work is plainly execution.
 
 ### Commit workflow — plan execution
 
@@ -203,3 +312,7 @@ true, so that part is on you.
 - Twelve-factor config: no hardcoded paths or settings outside `config/` profiles and env vars. This
   is what keeps the eventual move off this Mac a deployment change rather than a port.
 - No GPU/CUDA dependency in the base install — PyTorch lives in the optional `gpu` dependency group.
+- `.claude/settings.json` disables the `huggingface-skills` and `postman` plugins for this repo.
+  They are unused here and cost ~5.6k tokens of skill descriptions on *every* request — about 4%
+  of a day's cache reads. They stay enabled at user scope for other projects. JSON cannot carry a
+  comment, which is why the reason is recorded here.

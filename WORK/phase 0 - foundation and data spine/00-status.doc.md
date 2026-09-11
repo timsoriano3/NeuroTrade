@@ -1,0 +1,45 @@
+# Phase 0 — status
+
+**Deliverable (TRADER_PLAN §13):** hexagonal skeleton, plugin registries, IBKR paper
+connection, Parquet/DuckDB store, historical backfill, event-sourced replay harness.
+**Exit gate:** replay a full historical session deterministically; paper order round-trips.
+
+## Gates
+
+| Gate | Claim | Command | Verified |
+|---|---|---|---|
+| G1 | Session replay is bit-for-bit | `make verify-replay` | Yes — digest `4f58fe2c99cd26dc7cbb8faf033a39d1`, stable across processes with differing `PYTHONHASHSEED` |
+| G2 | Paper order round-trips | `make paper-smoke` | Yes — submitted, acknowledged and cancelled against paper account `DUT108414`; the order was written to the event log with its config hash, and that log replays deterministically |
+
+Both gates are **cleared**. The phase deliverable is **not** complete.
+
+## Built
+
+```
+src/neurotrade/
+  core/        types clock events ids intent orders position ports registry codec
+  adapters/
+    storage/   schemas parquet_store duckdb_catalog event_store
+    ibkr/      connection market_data broker pacing
+  features/    registry            (registry only — no features defined yet)
+  strategies/  base                (contract only — no strategies defined yet)
+  lab/         replay
+  bus.py config.py logs.py cli.py
+```
+~15.5k lines across `src`, `tests`, `scripts`, `config`. Tests sit beside every module.
+
+## Not built
+
+- **Historical backfill crawler** — the corpus is empty; `IbkrMarketData` fetches bars, but
+  nothing walks the universe and fills `raw/`.
+- **yfinance seed feed** — the zero-cost bootstrap ahead of IBKR backfill.
+- **Trading calendar** — sessions, holidays, half-days. `missing_sessions()` in
+  `DuckDBCatalog` takes an expected-session list it currently has no source for.
+- **Corpus quality gate** — the pass/fail that says the data is fit to research on.
+
+Nothing from Phase 1+ exists: no features, no strategies, no labelling, no CPCV, no cost
+model, no trial ledger, no risk engine, no execution engine, no `api/`, no `ui/`.
+
+## The one-line summary for a new session
+
+The skeleton and both proofs are done; there is no data in it and nothing trades yet.
