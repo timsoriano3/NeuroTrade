@@ -8,7 +8,7 @@ point does not change shape when those languages land.
 
 ```
 make doctor  setup  check(=lint typecheck test)  fmt  lint  typecheck  test
-make docs-check  show-config  replay  verify-replay  ibkr-check  paper-smoke  clean
+make docs-check  show-config  replay  verify-replay  ibkr-check  paper-smoke  backfill  clean
 ```
 
 ## Python toolchain

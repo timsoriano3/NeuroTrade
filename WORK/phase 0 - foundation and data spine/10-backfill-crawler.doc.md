@@ -1,8 +1,8 @@
 # The backfill crawler
 
-§12.1 stage 1: "pacing-aware, resumable, runs continuously". **All three parts now exist** —
-universe, work queue, and the fetch loop. Open: a CLI command, a make target, and the history
-window to run it with. The corpus is still empty; nothing has run against a live Gateway.
+§12.1 stage 1: "pacing-aware, resumable, runs continuously". Universe, work queue, fetch loop,
+CLI command and make target all exist. The corpus is still empty — the first live attempt
+timed out (see Known limitation and `08-gotchas.doc.md`).
 
 The spec defines neither the universe nor a calendar, and the crawler needs both. The calendar
 is `09-venue-calendar.doc.md`; the universe and queue are here.
@@ -87,16 +87,55 @@ per pass, so it blocks nothing, but it never resolves. The missing fact is halt 
 is §12.1 stage 5 and Phase 1. A completeness tolerance was rejected as the fix: it would
 silently accept short data everywhere to paper over one case.
 
+## The command: `neurotrade ibkr backfill` / `make backfill`
+
+`cli.py`'s `ibkr_backfill` is the only place the concrete adapters (IBKR feed, `ParquetStore`,
+`DuckDBCatalog`, `UniverseFile`, `VenueCalendar`) meet `ingest/`; `ingest/` itself stays
+core-only. Resolved the doc's open question: **`--start` is required, no default** — a default
+would silently decide how much history the corpus holds, and it isn't config since the window
+is data, not settings. `--end` defaults to yesterday in UTC, via `LiveClock` — UTC yesterday is
+never later than venue-local yesterday, so the default can never store a still-open session
+short.
+
+`--passes N` loops `crawl`, reusing one `VenueCalendar` across the loop (building one is the
+expensive part), and stops early when a pass plans zero cells or gives up. Detecting an empty
+plan costs one extra plan-only pass — no network requests — which was accepted as simpler than
+threading a "would this pass be empty" check through `crawl`.
+
+Connects once before the loop rather than lazily on first request: a lazy connect turns a dead
+Gateway into five `FAILED` cells instead of the one `IbkrConnectionError` it is (exit 1).
+
+Bars written (summed across all passes) go to stdout, for scripting; per-cell outcomes go to
+stderr, one line per cell, so a crawl measured in hours can be watched live. Exit is non-zero if
+the last pass did not complete. `backfill_pass_complete` is logged after every pass and carries
+the universe digest, since a corpus is only explainable if each pass says which symbol list it
+was filling.
+
+```bash
+make backfill START=2026-08-01                    # END defaults to yesterday, UTC
+make backfill START=2026-08-01 LIMIT=50 PASSES=3
+```
+
+## Known limitation, live
+
+The first live attempt (2026-09-12, weekend) found `ibkr check` healthy against `DUT108414` but
+`backfill` hung for 5+ minutes with zero bars: `qualifyContractsAsync` timed out at the raw
+`ib_async` layer. A healthy probe means the socket and login work, not that IBKR's historical
+data farms are serving — see the gotcha. Corpus is still empty; a per-request timeout in
+`adapters/ibkr/market_data.py` is the fix, not yet built.
+
 ## Not done
 
-- **CLI command and make target** to run `crawl` against IBKR. Open question: the history
-  window as a declared value in `base.yaml`, or a required `--start` argument with no default —
-  leaning required, since a default would silently decide how much data the corpus has.
+- **Per-request timeout** in `IbkrMarketData` around `qualifyContractsAsync` and
+  `reqHistoricalDataAsync` — without it a dead data farm hangs the crawl instead of failing the
+  cell and tripping `max_consecutive_failures`.
+- **The first live crawl**, once the timeout exists.
 - **Stages 2 and 3** — FirstRateData and Kibot samples, then yfinance daily bars and universe
   history. `Source` already has values for all three.
 
 ## Verified
 
-Reported by the session that built the crawler, pre-commit: `make check` 997 tests (30 in
-`test_crawler.py`), `lint-imports` 7 contracts kept, `make docs-check` 34 documents. Traps found
-building `ingest/` are in `08-gotchas.doc.md`; none new this session.
+`make check` PASS, 1008 tests; `invariant-auditor` found nothing; `docs-drift-auditor` found
+nothing. **Not verified live:** the 43-symbol universe against IBKR's contract database — the
+one attempt made timed out before qualifying anything, so it neither confirms nor refutes the
+seed file.

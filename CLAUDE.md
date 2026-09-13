@@ -61,6 +61,7 @@ make replay         # replay a session, print its digest. LOG= or SESSION=
 make verify-replay  # gate G1: replay twice, compare digests
 make ibkr-check     # probe IB Gateway: reachable, and the account we expect
 make paper-smoke    # gate G2: submit a paper order, acknowledge, cancel
+make backfill       # fill the bar corpus from IBKR. START=YYYY-MM-DD [END= LIMIT= PASSES=]
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`

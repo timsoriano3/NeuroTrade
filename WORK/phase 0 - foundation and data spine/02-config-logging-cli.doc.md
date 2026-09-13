@@ -55,7 +55,14 @@ neurotrade --profile <p> version
                         replay --log <path> | --session <YYYY-MM-DD>
                         ibkr check           # reachable? right account?
                         ibkr paper-smoke     # gate G2: submit, ack, cancel
+                        ibkr backfill --start YYYY-MM-DD [--end --limit --passes]
 ```
 
 Exposed as `[project.scripts] neurotrade`, and wrapped by `make show-config`, `make replay`,
-`make verify-replay`, `make ibkr-check`, `make paper-smoke`.
+`make verify-replay`, `make ibkr-check`, `make paper-smoke`, `make backfill`.
+
+`ibkr backfill` connects once up front rather than lazily on first request — otherwise a dead
+Gateway shows up as five `FAILED` cells instead of the one `IbkrConnectionError` it actually is
+(exit 1). `--passes N` reuses one `VenueCalendar` across loops of `crawl`, stopping early when a
+pass plans zero cells or gives up; detecting an empty plan costs one extra plan-only pass (no
+network requests). Bars written go to stdout for scripting; per-cell outcomes go to stderr.

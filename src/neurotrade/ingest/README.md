@@ -12,6 +12,15 @@ from live market data. This package is that plan.
 | `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work |
 | `crawler.py` | `crawl` — one pass: plan, fetch each missing session from the feed, write it to the store. `CrawlReport` says what the pass did |
 
+Wired to real adapters — IBKR feed, Parquet store, DuckDB catalog, venue
+calendar, universe file — by `neurotrade ibkr backfill` in `cli.py`, which is
+the only place those concretes meet this package:
+
+```bash
+make backfill START=2026-08-01             # END defaults to yesterday, UTC
+make backfill START=2026-08-01 LIMIT=50 PASSES=3
+```
+
 ## Why it depends on core alone
 
 Everything here goes through the interfaces in `core/ports.py`: the calendar,

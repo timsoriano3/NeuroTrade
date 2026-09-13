@@ -54,9 +54,10 @@ broker connection it trades through. 810 tests.
 | **Replay** | Re-runs a recorded session and proves it behaved the same, by hashing everything that happened |
 | **Broker** | Connects to Interactive Brokers, pulls historical bars within their rate limits, and places orders — with a structural guard that refuses real ones outside the live profile |
 
-Still to finish in Phase 0: a command that runs the backfill crawler, a free
-seed data feed, and yfinance daily bars with universe history. The crawler's
-fetch loop exists but has not been run, so the corpus is currently empty.
+Still to finish in Phase 0: a free seed data feed, and yfinance daily bars with
+universe history. The backfill crawler runs as `make backfill START=YYYY-MM-DD`
+but has not yet completed against a live Gateway, so the corpus is currently
+empty.
 
 Deliberately not built yet: strategies, models, the risk engine and the
 dashboard. Those are Phases 2 onward.

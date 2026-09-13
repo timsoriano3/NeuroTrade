@@ -19,20 +19,36 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from neurotrade import __version__
+from neurotrade.adapters.calendar.venue_calendar import VenueCalendar
 from neurotrade.adapters.ibkr.broker import IbkrBroker
 from neurotrade.adapters.ibkr.connection import IbkrConnection, IbkrConnectionError
+from neurotrade.adapters.ibkr.market_data import IbkrMarketData
+from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.adapters.storage.event_store import EventStore
-from neurotrade.config import Profile, Settings, config_hash, describe, load_settings
+from neurotrade.adapters.storage.parquet_store import ParquetStore
+from neurotrade.adapters.storage.schemas import Source
+from neurotrade.adapters.universe.universe_file import InvalidUniverseFile, UniverseFile
+from neurotrade.config import (
+    DEFAULT_CONFIG_DIR,
+    Profile,
+    Settings,
+    config_hash,
+    describe,
+    load_settings,
+)
 from neurotrade.core.clock import LiveClock, SimClock, to_datetime
+from neurotrade.core.events import BarInterval
 from neurotrade.core.ids import IntentId, OrderId, RunId
 from neurotrade.core.orders import Fill, Order, OrderType
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
+from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
 from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
 
@@ -44,6 +60,10 @@ _FOREVER_NS = 2**63 - 1
 """Upper bound for a whole-session replay. The log holds one session, so the
 range is only there to satisfy the port; bounding it by date would mean the CLI
 needing a venue calendar to know when the session ended."""
+
+_DEFAULT_UNIVERSE = DEFAULT_CONFIG_DIR / "universe.yaml"
+"""The committed seed universe. A flag rather than a setting because the
+universe is data, not configuration — see `Universe.digest`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +361,165 @@ def ibkr_paper_smoke(ctx: typer.Context) -> None:
     except IbkrConnectionError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
+
+
+@ibkr_app.command("backfill")
+def ibkr_backfill(
+    ctx: typer.Context,
+    start: Annotated[
+        datetime,
+        typer.Option("--start", help="First session to fill, as YYYY-MM-DD.", formats=["%Y-%m-%d"]),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end",
+            help="Last session to fill, as YYYY-MM-DD. Defaults to yesterday, UTC.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    interval: Annotated[
+        BarInterval, typer.Option("--interval", help="Bar size to fill.")
+    ] = BarInterval.MIN_1,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the symbols to fill.")
+    ] = _DEFAULT_UNIVERSE,
+    limit: Annotated[
+        int | None, typer.Option("--limit", min=1, help="Most cells to offer per pass.")
+    ] = None,
+    passes: Annotated[
+        int, typer.Option("--passes", min=1, help="Passes to run before exiting.")
+    ] = 1,
+) -> None:
+    """Fill the bar corpus from IBKR history (§12.1 stage 1).
+
+    Each pass plans from what is already on disk, fetches every missing or
+    short instrument-session, and writes it under the raw data root. Killing
+    the command loses nothing: the next run's plan starts from the corpus.
+
+    **`--start` has no default** because a default would silently decide how
+    much history the corpus holds. `--end` does: yesterday, because today's
+    session may still be trading and would be stored short.
+
+    Several passes retry what the previous one could not reach — a symbol
+    skipped after a failure, a pass ended by a Gateway that went away. Passes
+    stop early once the plan is empty or a pass gives up.
+
+    One line per cell goes to stderr as it happens, so a crawl that takes a day
+    can be watched. Stdout gets only the bars written, for scripting.
+
+    Exits non-zero when Gateway is unreachable, or when the last pass gave up.
+
+    Example:
+        $ neurotrade --profile paper ibkr backfill --start 2026-08-01
+        $ neurotrade ibkr backfill --start 2026-08-01 --end 2026-08-29 --limit 50
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+
+    first = start.date()
+    # UTC yesterday is never later than venue-local yesterday, so the default
+    # cannot reach a session that is still open anywhere in the universe.
+    last = end.date() if end is not None else to_datetime(clock.now_ns()).date() - timedelta(days=1)
+    if last < first:
+        typer.echo(f"--end {last} is before --start {first}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    bars_root = settings.storage.raw_dir / "bars"
+
+    def report_cell(outcome: CellOutcome) -> None:
+        line = f"{outcome.status.value:<8} {outcome.symbol!s:<12} {outcome.session_date}"
+        if outcome.status is CellStatus.FILLED:
+            line += f"  {outcome.written} bars"
+        elif outcome.error is not None:
+            line += f"  {outcome.error}"
+        typer.echo(line, err=True)
+
+    async def run() -> list[CrawlReport]:
+        connection = IbkrConnection(settings.ibkr)
+        feed = IbkrMarketData(connection, clock)
+        store = ParquetStore(bars_root, clock)
+        catalog = DuckDBCatalog(bars_root)
+        # The same calendar across passes: building one is the expensive part.
+        calendar = VenueCalendar()
+        reports: list[CrawlReport] = []
+        try:
+            # Connect up front. The feed would connect on first use, but then an
+            # unreachable Gateway reads as five failed cells rather than as the
+            # one clear error it is.
+            await connection.connect()
+            for number in range(1, passes + 1):
+                report = await crawl(
+                    universe,
+                    calendar,
+                    catalog,
+                    feed,
+                    store,
+                    start=first,
+                    end=last,
+                    source=Source.IBKR.value,
+                    interval=interval,
+                    limit=limit,
+                    on_outcome=report_cell,
+                )
+                reports.append(report)
+                _log_pass(number, report, universe.digest, first, last, interval)
+                if report.planned == 0 or not report.completed:
+                    break
+        finally:
+            connection.disconnect()
+        return reports
+
+    try:
+        reports = asyncio.run(run())
+    except IbkrConnectionError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+    last_report = reports[-1]
+    typer.echo(f"passes    {len(reports)}, last planned {last_report.planned} cells", err=True)
+    typer.echo(f"corpus    {bars_root}", err=True)
+    if not last_report.completed:
+        typer.echo(f"stopped   {last_report.stopped}", err=True)
+    typer.echo(sum(report.bars_written for report in reports))
+    if not last_report.completed:
+        raise typer.Exit(code=1)
+
+
+def _log_pass(
+    number: int,
+    report: CrawlReport,
+    universe_digest: str,
+    first: date,
+    last: date,
+    interval: BarInterval,
+) -> None:
+    """Record one pass. The universe digest goes on it because the universe is
+    data, outside the config hash, and a corpus is only explainable if each
+    pass says which list of symbols it was filling."""
+    log.info(
+        "backfill_pass_complete",
+        number=number,
+        universe_digest=universe_digest,
+        start=str(first),
+        end=str(last),
+        interval=interval.value,
+        planned=report.planned,
+        requests=report.requests,
+        bars_written=report.bars_written,
+        filled=report.count(CellStatus.FILLED),
+        empty=report.count(CellStatus.EMPTY),
+        failed=report.count(CellStatus.FAILED),
+        skipped=report.count(CellStatus.SKIPPED),
+        stopped=report.stopped,
+    )
 
 
 def _smoke_order(now: int, fingerprint: str) -> Order:

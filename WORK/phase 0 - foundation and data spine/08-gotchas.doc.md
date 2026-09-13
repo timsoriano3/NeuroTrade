@@ -64,6 +64,15 @@ duration per interval, checked *before* the pacer.
 
 **`Venue.SMART` is an order router, not a listing venue.** `Symbol` rejects it.
 
+**A healthy `ibkr check` does not mean the data farms are up.** The socket, login and account
+check can all pass while historical requests hang — observed on a weekend against account
+`DUT108414`. `IbkrMarketData._qualify` (`qualifyContractsAsync`) and `fetch_bars`
+(`reqHistoricalDataAsync`) have no `asyncio.wait_for` around them, so a farm that never answers
+hangs the crawl forever instead of surfacing as `FAILED` and tripping
+`max_consecutive_failures`. Connect also logs noisy "request timed out" lines for
+positions/orders/executions during the same outage. Fix is a per-request timeout in
+`adapters/ibkr/market_data.py` — not yet done.
+
 **`ib_insync` is archived; `ib_async` is the successor.** Training data and search results are
 full of `ib_insync` answers. Use context7 for this API rather than recall.
 

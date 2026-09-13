@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke docs-check \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -107,6 +107,14 @@ ibkr-check: ## Probe IB Gateway: reachable, and the account we expect
 
 paper-smoke: ## Gate G2: submit a paper order, acknowledge, cancel
 	$(PY) neurotrade --profile paper ibkr paper-smoke
+
+# START has no default: a default would silently decide how much history the
+# corpus holds. END defaults to yesterday inside the command; LIMIT and PASSES
+# are optional.
+backfill: ## Fill the corpus from IBKR. START=YYYY-MM-DD [END= LIMIT= PASSES=]
+	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
+	$(PY) neurotrade --profile $(PROFILE) ibkr backfill --start $(START) \
+	  $(if $(END),--end $(END)) $(if $(LIMIT),--limit $(LIMIT)) $(if $(PASSES),--passes $(PASSES))
 
 replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
 	@if [ -n "$(SESSION)" ]; then \
