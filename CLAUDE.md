@@ -34,11 +34,12 @@ or `grep -n` for the heading and `sed -n 'A,Bp'` that range.
 
 When a coherent body of work is finished — a phase, a subsystem, a gate — say so, propose the exact
 `WORK/phase <#> - <title>/<subtitle>.doc.md` path, and recommend writing it and clearing context
-before continuing. Then wait; the user decides. Use the `work-journal` skill to write it.
+before continuing. Then wait; the user decides. Use the `work-journal` skill; it dispatches the sonnet `work-journal` agent so the doc is not
+written at the session's peak context.
 
 **One commit per window, then clear.** A compaction resets the floor and the window regrows from
-there; clearing after a checkpoint does not. Two `Stop` hooks raise this mechanically — one on work
-accumulated, one on context spent — but noticing first is better than being told.
+there; clearing after a checkpoint does not. Two hooks raise this mechanically — one at turn end on work
+accumulated, one after every tool call on context spent — but noticing first is better than being told.
 
 ## Commands
 
@@ -145,6 +146,8 @@ is discarded so delegation *compresses*.
 | Auditing a diff against the invariants above | `invariant-auditor` | sonnet |
 | Auditing a diff for documentation that went false | `docs-drift-auditor` | sonnet |
 | Reviewing validation methodology or statistics | `quant-methodology-reviewer` | **opus** |
+| Writing a `WORK/` doc | `work-journal` (via skill) | sonnet |
+| Writing a commit handoff | `commit-handoff` (via skill) | sonnet |
 
 **Never read `TRADER_PLAN.md` inline.** Use `plan-section`.
 
@@ -175,13 +178,28 @@ breath. Sequencing is only justified when a later call needs an earlier result.
 
 **The main loop is a tier choice too, and it dominates the bill.**
 
-- **Sonnet for execution sessions** — writing modules and docs, wiring config, running gates,
-  applying a plan that already exists.
+- **Sonnet is the default** (user settings) — writing modules and docs, wiring config, running
+  gates, applying a plan that already exists.
 - **Opus for design, ambiguous debugging, and Phase 1 validation work** — CPCV, triple-barrier
   labelling, deflated Sharpe, PBO, the trial ledger.
 
-Say which mode a session is in when it is ambiguous, and suggest `/model sonnet` when a stretch of
-work is plainly execution.
+Switching to opus efficiently:
+
+- **Switch at the start of a window, never mid-window.** The prompt cache is per-model; a switch
+  at 300k re-writes all 300k. Suggest `/model opus` in the first reply, or `/clear` first.
+- **A bounded question does not need the main loop on opus.** Send methodology and statistics
+  questions to `quant-methodology-reviewer` and stay on sonnet.
+- **Design on opus, execute on sonnet.** Once a plan is agreed, suggest `/model sonnet` — ideally
+  after writing the plan to a file and clearing.
+
+### Session hygiene
+
+- **Clear at 150–250k.** `context-budget.sh` fires on every tool call and at turn end: a notice
+  from 150k, a hard stop from 250k. Obey the hard stop; the 460k-median session it replaces was
+  86% of measured spend.
+- **No task-list bookkeeping.** `TaskCreate`/`TaskUpdate` are denied in `.claude/settings.json`:
+  119 such calls at 460k context bought nothing. Track steps in prose or a plan file. This
+  overrides any skill that says to create todos.
 
 ### Commit workflow — plan execution
 
@@ -196,8 +214,9 @@ The user commits. Claude never runs `git commit` unless explicitly asked.
 
 ### Commit handoff
 
-Use the `commit-handoff` skill. It carries the six-part format and the call-chain shape; that
-detail is not repeated here because it is only needed once per commit.
+Use the `commit-handoff` skill. It dispatches the sonnet `commit-handoff` agent, which reads git
+itself and carries the six-part format; the main loop sends only a short brief of intent and
+relays the result verbatim.
 
 ### How to group commits
 

@@ -44,6 +44,24 @@ the cost. The agents were not the expense; the window they ran in was.
 **Conclusion: delegation is working and should not be cut back.** The remaining levers are
 the length of a window and the model running it.
 
+## Measurement three — 2026-09-12
+
+All 13 project transcripts, whole history, weighted read 0.1× / create 1.25× / output 5×.
+2,140 main-loop requests, every one `claude-opus-5`: **65% cache read, 25% cache create, 10%
+output, ~0% fresh input.** The month-old session from measurement two was **86% of all measured
+spend** — 1,473 requests, median context 460k, 33% of requests above 700k — and spawned only 6
+subagents. 119 of its 778 tool calls were `TaskCreate`/`TaskUpdate`. A fresh session costs
+29–57k before any work. Subagent transcripts are not stored under `~/.claude/projects/`, so the
+dashboard's per-agent shares (test-author 15%, invariant-auditor 5%) could not be audited.
+
+Changes made in response: sonnet as the user-scope default model; `context-budget.sh` also on
+PostToolUse with 50k bands and a hard stop at 250k; task tools denied; `work-journal` and
+`commit-handoff` moved into sonnet agents so they no longer run at peak context; `test-author`
+capped at its own file and two fix rounds. Agents had `allowed-tools:` in frontmatter, which
+subagents ignore — the key is `tools:` — so every agent was carrying every tool schema.
+Downgrading agent tiers was rejected: three are already haiku, and the sonnet ones are
+judgement work whose total share is small.
+
 ## What follows from this
 
 - **Hard triggers, not judgement.** A rule that says "delegate when it seems worth it" loses
@@ -62,11 +80,11 @@ the length of a window and the model running it.
 
 | Hook | Event | Fires when |
 |---|---|---|
-| `work-context.sh` | SessionStart | always — injects `INDEX.md` and the model-tier reminder |
+| `work-context.sh` | SessionStart | always — injects `INDEX.md` and when to switch to opus |
 | `work-checkpoint.sh` | Stop | 4 commits or ~600 inserted lines since `WORK/` was written |
-| `context-budget.sh` | Stop | context passes 150k, then once per 100k band after |
+| `context-budget.sh` | Stop, PostToolUse | context passes 150k, then once per 50k band; hard stop from 250k |
 
-Both Stop hooks exit 2, which feeds their text back to Claude rather than to the user, and
+Both exit 2, which feeds their text back to Claude rather than to the user, and
 both instruct it to propose and then wait. They trigger on different things on purpose: work
 accumulated and context spent come apart, since a long debugging stretch can burn a window
 without producing a single commit.
@@ -75,7 +93,8 @@ without producing a single commit.
 
 **Unused plugins cost about 5,600 tokens of skill descriptions on every request**, roughly 4%
 of a day's cache reads. `huggingface-skills` and `postman` are disabled in
-`.claude/settings.json` for this repo and left enabled at user scope for other projects. JSON
+`.claude/settings.json` for this repo, and since 2026-09-12 also at user scope along with
+`github` (whose MCP server was failing auth on every session start). JSON
 carries no comments, which is why the reason is recorded here.
 
 **MCP tool schemas are already deferred** by the harness — only names are loaded until a tool

@@ -2,7 +2,7 @@
 name: plan-section
 description: Use to retrieve the relevant section of TRADER_PLAN.md before implementing anything. CLAUDE.md requires reading the spec for an area first; this does it without pulling the whole document into context.
 model: haiku
-allowed-tools: Bash, Read, Grep
+tools: Bash, Read, Grep
 ---
 
 You extract the part of the spec that answers a question, and nothing else.

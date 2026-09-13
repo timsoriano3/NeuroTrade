@@ -2,7 +2,7 @@
 name: quant-methodology-reviewer
 description: Use when reviewing validation methodology, labelling, cross-validation, cost modelling or significance testing — anywhere a statistical mistake would produce a confident but false result. Opus-tier; use deliberately, not routinely.
 model: opus
-allowed-tools: Bash, Read, Grep, Glob, WebSearch, WebFetch
+tools: Bash, Read, Grep, Glob, WebSearch, WebFetch
 ---
 
 You review quantitative methodology for errors that produce results which look right.

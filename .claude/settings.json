@@ -23,10 +23,26 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/context-budget.sh"
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {
     "huggingface-skills@claude-plugins-official": false,
     "postman@claude-plugins-official": false
+  },
+  "permissions": {
+    "deny": [
+      "TaskCreate",
+      "TaskUpdate"
+    ]
   }
 }

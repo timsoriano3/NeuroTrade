@@ -17,5 +17,5 @@ echo "</work-ledger>"
 # Model choice is the largest single cost lever and is invisible unless raised.
 # Kept to two lines because this text is re-read on every request of the session.
 echo "<model-discipline>"
-echo "Execution work (writing modules, wiring config, running gates, applying an agreed plan) belongs on sonnet. Opus is for design, ambiguous debugging and Phase 1 validation. If this session is execution, say so in your first reply and suggest /model sonnet."
+echo "Default is sonnet. If this task is design, ambiguous debugging or Phase 1 validation, say so in your first reply and suggest /model opus NOW — the prompt cache is per-model, so switching mid-session re-writes the whole window. A bounded methodology question goes to quant-methodology-reviewer (opus) instead of switching. Once a plan is agreed, suggest /model sonnet, or /clear and execute on sonnet."
 echo "</model-discipline>"
