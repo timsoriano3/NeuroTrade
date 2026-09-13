@@ -1,7 +1,6 @@
 # ingest
 
-Building the corpus: deciding what to fetch. The fetching itself arrives with
-the crawler loop.
+Building the corpus: deciding what to fetch, then fetching it.
 
 The training corpus is a first-class asset with its own build plan, separate
 from live market data. This package is that plan.
@@ -11,6 +10,7 @@ from live market data. This package is that plan.
 | File | What it does |
 |---|---|
 | `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work |
+| `crawler.py` | `crawl` — one pass: plan, fetch each missing session from the feed, write it to the store. `CrawlReport` says what the pass did |
 
 ## Why it depends on core alone
 
@@ -55,3 +55,18 @@ before any symbol's older ones. An interrupted crawl then leaves a corpus that i
 shallow across the whole universe rather than deep for the alphabetically early
 part of it — a cross-sectional study can use the former and cannot use the
 latter.
+
+## One pass, then re-plan
+
+`crawl` plans once, drains that plan and returns. Continuous running is a loop
+of passes, because the plan is a snapshot of the corpus and a crawl measured in
+weeks should re-read it rather than trust a queue computed days earlier.
+
+Within a pass, never-fetched sessions go ahead of short ones: a short session
+may be a halt, and re-requesting it mostly returns the same shortfall.
+
+Pacing is the feed's job, not the loop's — `MarketDataPort` requires adapters
+to pace themselves, and the IBKR adapter waits on its own limiter. A symbol
+whose request fails is skipped for the rest of the pass, and a run of
+consecutive failures ends the pass, since that pattern is a dead connection
+rather than a bad listing.

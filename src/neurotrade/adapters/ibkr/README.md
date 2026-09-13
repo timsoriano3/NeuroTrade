@@ -12,8 +12,8 @@ Talks to Interactive Brokers through IB Gateway.
 | `broker.py` | Places and cancels orders; turns executions into `Fill` records |
 
 The backfill crawler that drives `market_data.py` across a universe of symbols
-is not here yet — this layer fetches what it is asked for, nothing decides what
-to ask for.
+lives in `ingest/crawler.py`, behind `MarketDataPort`. This layer fetches what
+it is asked for; it does not decide what to ask for.
 
 ## Connecting proves less than it looks
 
