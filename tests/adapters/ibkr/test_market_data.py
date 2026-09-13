@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from neurotrade.adapters.ibkr.connection import IbkrConnection
 from neurotrade.adapters.ibkr.market_data import (
@@ -25,7 +27,7 @@ from neurotrade.core.clock import SimClock
 from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.ports import MarketDataPort
 from neurotrade.core.types import Price, Symbol, Venue
-from tests.adapters.ibkr.conftest import FakeContract, FakeIB, a_bar
+from tests.adapters.ibkr.conftest import FakeBarData, FakeContract, FakeIB, a_bar
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
 SHOP = Symbol("SHOP", Venue.TSX)
@@ -177,6 +179,59 @@ async def test_a_refused_request_names_the_instrument() -> None:
     feed, _ = a_feed(historical_error=RuntimeError("pacing violation"))
     with pytest.raises(MarketDataError, match=r"AAPL\.NASDAQ"):
         await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+
+
+# ── Timeouts ─────────────────────────────────────────────────
+
+
+async def test_the_history_request_carries_the_configured_timeout() -> None:
+    ib = FakeIB(bars=[a_bar(0)])
+    connection = IbkrConnection(IbkrSettings(request_timeout_seconds=12.5), ib=ib)
+    await IbkrMarketData(connection, SimClock(OPEN_NS)).fetch_bars(
+        AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER
+    )
+    assert ib.historical_calls[0]["timeout"] == 12.5
+
+
+def _timing_out_feed(bars: list[FakeBarData]) -> IbkrMarketData:
+    """A feed whose history request takes exactly the whole timeout, as
+    `ib_async` does when it gives up waiting."""
+    clock = SimClock(OPEN_NS)
+
+    def elapse(kwargs: dict[str, Any]) -> None:
+        clock.advance_ns(int(kwargs["timeout"] * 1_000_000_000))
+
+    ib = FakeIB(bars=bars, on_historical=elapse)
+    return IbkrMarketData(IbkrConnection(IbkrSettings(), ib=ib), clock)
+
+
+async def test_a_history_request_that_times_out_is_an_error_not_an_empty_day() -> None:
+    """ib_async answers a timeout with no bars. Recording that as "nothing
+    traded" would let a crawler with a dead feed report every session empty."""
+    with pytest.raises(MarketDataError, match="went unanswered"):
+        await _timing_out_feed([]).fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+
+
+async def test_bars_that_arrive_slowly_are_still_bars() -> None:
+    """Elapsed time alone is not a timeout; only elapsed time with no answer."""
+    bars = await _timing_out_feed([a_bar(0)]).fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert len(bars) == 1
+
+
+async def test_an_unanswered_contract_lookup_is_an_error() -> None:
+    ib = FakeIB(qualify_hangs=True)
+    connection = IbkrConnection(IbkrSettings(request_timeout_seconds=0.05), ib=ib)
+    feed = IbkrMarketData(connection, SimClock(OPEN_NS))
+    with pytest.raises(MarketDataError, match=r"resolving AAPL\.NASDAQ went unanswered"):
+        await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert not ib.historical_calls  # never got as far as asking for bars
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_a_request_timeout_must_be_positive(bad: float) -> None:
+    """Zero would disable the timeout, which is the hang this setting exists to end."""
+    with pytest.raises(ValidationError):
+        IbkrSettings(request_timeout_seconds=bad)
 
 
 # ── Pacing ───────────────────────────────────────────────────

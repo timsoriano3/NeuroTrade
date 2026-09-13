@@ -123,6 +123,8 @@ class FakeIB:
         bars: list[FakeBarData] | None = None,
         contracts: list[FakeContract] | None = None,
         historical_error: Exception | None = None,
+        on_historical: Callable[[dict[str, Any]], None] | None = None,
+        qualify_hangs: bool = False,
         place_error: Exception | None = None,
     ) -> None:
         self.client: FakeClient = FakeClient()
@@ -133,6 +135,8 @@ class FakeIB:
         self._bars = bars if bars is not None else []
         self._contracts = contracts if contracts is not None else [FakeContract()]
         self._historical_error = historical_error
+        self._on_historical = on_historical
+        self._qualify_hangs = qualify_hangs
 
         self.connect_calls = 0
         self.disconnect_calls = 0
@@ -165,10 +169,14 @@ class FakeIB:
     # ── Market data ──────────────────────────────────────────
 
     async def qualifyContractsAsync(self, *contracts: object) -> list[Any]:
+        if self._qualify_hangs:
+            await asyncio.sleep(60)  # a Gateway cut off from its data farms
         return list(self._contracts)
 
     async def reqHistoricalDataAsync(self, *args: object, **kwargs: object) -> list[Any]:
         self.historical_calls.append(dict(kwargs))
+        if self._on_historical is not None:
+            self._on_historical(dict(kwargs))
         if self._historical_error is not None:
             raise self._historical_error
         return list(self._bars)

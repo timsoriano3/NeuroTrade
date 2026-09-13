@@ -110,6 +110,7 @@ class IbkrClient(Protocol):
         whatToShow: str,
         useRTH: bool,
         formatDate: int = ...,
+        timeout: float = ...,
     ) -> Awaitable[list[Any]]: ...
 
 

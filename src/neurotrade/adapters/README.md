@@ -18,7 +18,7 @@ about adapters.
 | `storage/` | Built. The market-data corpus and the event log |
 | `calendar/` | Built. Which days each venue traded, and between which times |
 | `universe/` | Built. Which instruments are in scope, read from `config/universe.yaml` |
-| `ibkr/` | Built. Connection, historical bars, request pacing, order placement. The backfill crawler that drives it is still open |
+| `ibkr/` | Built. Connection, historical bars, request pacing, order placement. Driven by the backfill crawler via `neurotrade ibkr backfill` |
 | `feeds/` | Not built. yfinance and the free sample sources |
 | `notify/` | Not built. Alerting |
 

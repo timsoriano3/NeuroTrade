@@ -121,21 +121,22 @@ make backfill START=2026-08-01 LIMIT=50 PASSES=3
 The first live attempt (2026-09-12, weekend) found `ibkr check` healthy against `DUT108414` but
 `backfill` hung for 5+ minutes with zero bars: `qualifyContractsAsync` timed out at the raw
 `ib_async` layer. A healthy probe means the socket and login work, not that IBKR's historical
-data farms are serving — see the gotcha. Corpus is still empty; a per-request timeout in
-`adapters/ibkr/market_data.py` is the fix, not yet built.
+data farms are serving — see the gotcha. `IbkrMarketData` now has a per-request timeout (fixed,
+see `08-gotchas.doc.md`); a second live attempt the same day (farms still down, timeout set to
+10s) failed 5 cells cleanly with "resolving X went unanswered for 10.0s" and stopped the pass
+(exit 1) instead of hanging. Corpus is still empty — the crawl still needs a weekday with the
+farms up.
 
 ## Not done
 
-- **Per-request timeout** in `IbkrMarketData` around `qualifyContractsAsync` and
-  `reqHistoricalDataAsync` — without it a dead data farm hangs the crawl instead of failing the
-  cell and tripping `max_consecutive_failures`.
-- **The first live crawl**, once the timeout exists.
+- **The first successful live crawl** — every attempt so far has hit the weekend data-farm
+  outage; the timeout now fails those cells cleanly instead of hanging, but no bars have landed.
 - **Stages 2 and 3** — FirstRateData and Kibot samples, then yfinance daily bars and universe
   history. `Source` already has values for all three.
 
 ## Verified
 
-`make check` PASS, 1008 tests; `invariant-auditor` found nothing; `docs-drift-auditor` found
-nothing. **Not verified live:** the 43-symbol universe against IBKR's contract database — the
-one attempt made timed out before qualifying anything, so it neither confirms nor refutes the
-seed file.
+`make check` PASS, 1014 tests; `invariant-auditor` found nothing; `docs-drift-auditor` found
+nothing. **Not verified live:** the 43-symbol universe against IBKR's contract database — every
+live attempt so far has hit the weekend data-farm outage before qualifying anything, so it
+neither confirms nor refutes the seed file.

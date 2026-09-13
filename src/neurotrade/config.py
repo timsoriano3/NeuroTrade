@@ -141,6 +141,12 @@ class IbkrSettings(BaseModel):
     client_id: int = 1  # distinct per connected process; two clients cannot share one
     account: str = ""  # expected account, e.g. "DUT108414"; blank means do not check
     timeout_seconds: float = 20.0  # Gateway can be slow to answer just after login
+    request_timeout_seconds: float = Field(default=60.0, gt=0)  # per contract/history request
+    """How long one market-data request may go unanswered before it counts as a
+    failure. A healthy Gateway can still be cut off from IBKR's data farms — the
+    socket answers, the probe passes, and requests simply never return. 60s is
+    `ib_async`'s own historical default; one session of minute bars normally
+    answers in seconds. Must be positive: zero would mean wait forever."""
 
     @property
     def is_paper_port(self) -> bool:

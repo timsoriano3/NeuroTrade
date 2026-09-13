@@ -22,6 +22,13 @@ downstream is exact.
 Requests are paced (§12.1): IBKR permits about 60 historical requests per ten
 minutes, and exceeding it locks out further requests rather than returning a
 retryable error.
+
+**Requests time out as errors, never as empty answers.** A Gateway can be up and
+logged in while its data farms are unreachable (IBKR's weekend maintenance, for
+one). Contract lookup then never answers, and `ib_async`'s historical request
+times out by quietly returning no bars — indistinguishable from a halt. A
+crawler would record every session as "nothing traded" and never notice the
+feed was dead, so both cases raise `MarketDataError` here instead.
 """
 
 from __future__ import annotations
@@ -191,7 +198,8 @@ class IbkrMarketData:
 
         Raises:
             MarketDataError: If the instrument cannot be resolved, the interval
-                is unsupported, or IBKR refuses the request.
+                is unsupported, IBKR refuses the request, or it goes unanswered
+                for `request_timeout_seconds`.
         """
         if interval not in _BAR_SIZE:
             raise MarketDataError(f"no IBKR bar size for {interval.value}")
@@ -212,7 +220,12 @@ class IbkrMarketData:
             await asyncio.sleep(wait)
 
         self._pacer.record()
+        timeout = self._connection.settings.request_timeout_seconds
+        sent_at = self._clock.now_ns()
         try:
+            # ib_async's own timeout rather than asyncio.wait_for: on expiry it
+            # cancels the request at IBKR, where cancelling our coroutine would
+            # leave it running there, holding one of the few concurrent slots.
             raw = await self._connection.ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime=to_datetime(end),
@@ -221,9 +234,18 @@ class IbkrMarketData:
                 whatToShow="TRADES",
                 useRTH=self._use_rth,
                 formatDate=2,  # UTC-aware datetimes rather than local strings
+                timeout=timeout,
             )
         except Exception as error:
             raise MarketDataError(f"historical request failed for {symbol}: {error}") from error
+
+        # The price of that choice: a timeout comes back as an empty list, the
+        # same as a day with no trades. Only the elapsed time tells them apart.
+        if not raw and self._clock.now_ns() - sent_at >= int(timeout * 1_000_000_000):
+            raise MarketDataError(
+                f"historical request for {symbol} went unanswered for {timeout}s — "
+                f"is Gateway connected to its data farms?"
+            )
 
         received_at = self._clock.now_ns()
         bars = [
@@ -241,8 +263,8 @@ class IbkrMarketData:
         to chance when the alternatives differ in currency and price.
 
         Raises:
-            MarketDataError: If the instrument does not resolve, or resolves
-                ambiguously.
+            MarketDataError: If the instrument does not resolve, resolves
+                ambiguously, or the lookup goes unanswered.
         """
         exchange = IBKR_EXCHANGE.get(symbol.venue)
         if exchange is None:
@@ -254,8 +276,18 @@ class IbkrMarketData:
             symbol.currency.value,
             primaryExchange=exchange,
         )
+        timeout = self._connection.settings.request_timeout_seconds
         try:
-            qualified = await self._connection.ib.qualifyContractsAsync(stock)
+            qualified = await asyncio.wait_for(
+                self._connection.ib.qualifyContractsAsync(stock), timeout
+            )
+        except TimeoutError as error:
+            # Contract lookups are not paced and hold no concurrent slot, so
+            # abandoning one locally costs nothing at IBKR.
+            raise MarketDataError(
+                f"resolving {symbol} went unanswered for {timeout}s — "
+                f"is Gateway connected to its data farms?"
+            ) from error
         except Exception as error:
             raise MarketDataError(f"could not resolve {symbol}: {error}") from error
 

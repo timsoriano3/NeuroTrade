@@ -46,10 +46,10 @@ Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is 
   continuously. `ingest/backfill.py` walks the universe against the calendar and yields the
   sessions that are short; `ingest/crawler.py` drains that queue through `MarketDataPort` into
   `StoragePort` and reports what happened; `neurotrade ibkr backfill` / `make backfill` runs it
-  against IBKR. The corpus is still empty: the first live attempt (2026-09-12, weekend) found
-  `ibkr check` healthy but the historical request itself hung with no timeout — see
-  `10-backfill-crawler.doc.md` and the gotcha. A per-request timeout is next, then the first
-  real crawl.
+  against IBKR. The corpus is still empty: every live attempt so far (2026-09-12, weekend) hit
+  IBKR's data-farm outage — first as a hang with no timeout, then (after adding
+  `request_timeout_seconds`, see `08-gotchas.doc.md`) as a clean per-cell failure — see
+  `10-backfill-crawler.doc.md`. What is left is a weekday crawl with the farms up.
 - **Free sample seed data** (§12.1 stage 2) — FirstRateData / Kibot samples, so the lab has
   something to work with before the crawler has run.
 - **yfinance daily bars and universe history** (§12.1 stage 3) — including `.TO` tickers.

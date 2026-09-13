@@ -35,6 +35,16 @@ Historical bars → `Bar` events.
   close_ns = (opened_at * 1_000_000_000) + interval.nanos
   ```
 - `MarketDataError` on a rejected or empty request.
+- **Per-request timeout (`IbkrSettings.request_timeout_seconds`, default 60s).** A Gateway can
+  be up and logged in while IBKR's data farms are unreachable — contract lookup then never
+  answers, and `ib_async`'s historical request times out by quietly returning no bars,
+  indistinguishable from a real halt. `_qualify` wraps `qualifyContractsAsync` in
+  `asyncio.wait_for` (unpaced, no IBKR-side slot, free to abandon locally). `fetch_bars` instead
+  passes `timeout=` into `reqHistoricalDataAsync` itself — `ib_async` cancels the request at
+  IBKR on expiry, where `wait_for` would only abandon it client-side and leave it holding one of
+  the few concurrent slots — then reclassifies an empty result as `MarketDataError` if the
+  injected `Clock` shows elapsed time `>= timeout`. Both paths name the instrument and the
+  timeout in the error.
 
 ## `pacing.py`
 

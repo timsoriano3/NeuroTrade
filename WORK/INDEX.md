@@ -15,12 +15,12 @@ Phase 0 exit gates, both verified:
 - **G1** — a session replays bit-for-bit. `make verify-replay` → `4f58fe2c99cd26dc7cbb8faf033a39d1`
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
-Phase 0 work still open (§12.1): a **per-request timeout in the IBKR adapter**, the first live
-backfill crawl, free sample seed data, and yfinance daily bars plus universe history. Universe,
-calendar, work queue, fetch loop and the `ibkr backfill` / `make backfill` command all exist —
-none of it in the spec — but the first live attempt hung (healthy Gateway, historical request
-never returned) and the corpus is still empty. See `10-backfill-crawler.doc.md` and
-`08-gotchas.doc.md`. The corpus quality gate is **Phase 1**, not Phase 0.
+Phase 0 work still open (§12.1): the first successful live backfill crawl, free sample seed
+data, and yfinance daily bars plus universe history. Universe, calendar, work queue, fetch loop,
+the `ibkr backfill` / `make backfill` command and a per-request IBKR timeout all exist — none of
+it in the spec — but every live attempt has hit IBKR's weekend data-farm outage, so the corpus
+is still empty. See `10-backfill-crawler.doc.md` and `08-gotchas.doc.md`. The corpus quality
+gate is **Phase 1**, not Phase 0.
 
 ## Phase 0 — foundation and data spine
 

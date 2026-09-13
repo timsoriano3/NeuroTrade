@@ -66,12 +66,15 @@ duration per interval, checked *before* the pacer.
 
 **A healthy `ibkr check` does not mean the data farms are up.** The socket, login and account
 check can all pass while historical requests hang — observed on a weekend against account
-`DUT108414`. `IbkrMarketData._qualify` (`qualifyContractsAsync`) and `fetch_bars`
-(`reqHistoricalDataAsync`) have no `asyncio.wait_for` around them, so a farm that never answers
-hangs the crawl forever instead of surfacing as `FAILED` and tripping
-`max_consecutive_failures`. Connect also logs noisy "request timed out" lines for
-positions/orders/executions during the same outage. Fix is a per-request timeout in
-`adapters/ibkr/market_data.py` — not yet done.
+`DUT108414`. Connect also logs noisy "request timed out" lines for positions/orders/executions
+during the same outage — harmless, ignore them.
+
+**Fixed:** `IbkrMarketData` now has a `request_timeout_seconds` config (default 60s, `ib_async`'s
+own default). Qualify uses `asyncio.wait_for`; history passes `timeout=` into
+`reqHistoricalDataAsync` and reclassifies an empty-but-elapsed result as `MarketDataError` — see
+`06-ibkr-adapter.doc.md`. Verified live 2026-09-12 (Sat, farms down) with the timeout set to 10s:
+`ibkr backfill` failed 5 cells cleanly with "resolving X went unanswered for 10.0s" and stopped
+the pass (exit 1) instead of hanging.
 
 **`ib_insync` is archived; `ib_async` is the successor.** Training data and search results are
 full of `ib_insync` answers. Use context7 for this API rather than recall.
