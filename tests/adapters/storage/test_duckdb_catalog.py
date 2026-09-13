@@ -194,6 +194,64 @@ def test_extra_held_sessions_are_not_reported(
     assert catalog.missing_sessions(AAPL, [MON]) == ()
 
 
+# ── Bar counts: what plan_backfill asks per symbol ───────────
+
+
+def test_bar_counts_is_empty_for_an_empty_corpus(tmp_path: Path) -> None:
+    catalog = DuckDBCatalog(tmp_path / "nothing-here")
+    assert catalog.bar_counts(AAPL) == {}
+
+
+def test_bar_counts_is_per_session_ascending(
+    corpus: tuple[ParquetStore, DuckDBCatalog],
+) -> None:
+    """Written out of order; the mapping still comes back oldest first."""
+    store, catalog = corpus
+    store.write_bars([bar(i) for i in range(3)], source="ibkr", session_date=WED)
+    store.write_bars([bar(i) for i in range(5)], source="ibkr", session_date=MON)
+    store.write_bars([bar(i) for i in range(2)], source="ibkr", session_date=TUE)
+
+    counts = catalog.bar_counts(AAPL)
+    assert counts == {MON: 5, TUE: 2, WED: 3}
+    assert list(counts) == [MON, TUE, WED]
+
+
+def test_sessions_with_nothing_held_are_absent_not_zero(
+    corpus: tuple[ParquetStore, DuckDBCatalog],
+) -> None:
+    store, catalog = corpus
+    store.write_bars([bar(0)], source="ibkr", session_date=MON)
+    counts = catalog.bar_counts(AAPL)
+    assert counts == {MON: 1}
+    assert TUE not in counts
+
+
+def test_bar_counts_is_per_interval(
+    corpus: tuple[ParquetStore, DuckDBCatalog],
+) -> None:
+    """A session's 1-minute bars are not counted as 5-minute bars."""
+    store, catalog = corpus
+    store.write_bars(
+        [bar(i, interval=BarInterval.MIN_1) for i in range(3)], source="ibkr", session_date=MON
+    )
+    store.write_bars([bar(0, interval=BarInterval.MIN_5)], source="ibkr", session_date=MON)
+
+    assert catalog.bar_counts(AAPL, BarInterval.MIN_1) == {MON: 3}
+    assert catalog.bar_counts(AAPL, BarInterval.MIN_5) == {MON: 1}
+
+
+def test_bar_counts_agrees_with_coverage(
+    corpus: tuple[ParquetStore, DuckDBCatalog],
+) -> None:
+    store, catalog = corpus
+    store.write_bars([bar(i) for i in range(10)], source="ibkr", session_date=MON)
+    store.write_bars([bar(i) for i in range(5)], source="ibkr", session_date=TUE)
+
+    from_bar_counts = catalog.bar_counts(AAPL)
+    from_coverage = {entry.session_date: entry.bar_count for entry in catalog.coverage(AAPL)}
+    assert from_bar_counts == from_coverage
+
+
 # ── Gaps inside a session ────────────────────────────────────
 
 

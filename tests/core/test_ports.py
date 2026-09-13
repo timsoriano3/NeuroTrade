@@ -8,7 +8,7 @@ core, and that core does not depend on any adapter.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import get_type_hints
@@ -21,6 +21,7 @@ from neurotrade.core.ids import OrderId
 from neurotrade.core.orders import Order
 from neurotrade.core.ports import (
     BrokerPort,
+    CatalogPort,
     EventStorePort,
     MarketDataPort,
     StoragePort,
@@ -30,7 +31,7 @@ from neurotrade.core.types import Price, Quantity, Symbol, Venue
 from neurotrade.core.universe import Universe
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
-PORTS = [MarketDataPort, BrokerPort, StoragePort, EventStorePort, UniversePort]
+PORTS = [MarketDataPort, BrokerPort, StoragePort, EventStorePort, UniversePort, CatalogPort]
 
 
 # ── Structural conformance ───────────────────────────────────
@@ -110,6 +111,14 @@ class FakeUniverse:
         return self._universe
 
 
+class FakeCatalog:
+    def __init__(self) -> None:
+        self.counts: dict[Symbol, dict[date, int]] = {}
+
+    def bar_counts(self, symbol: Symbol, interval: BarInterval) -> Mapping[date, int]:
+        return self.counts.get(symbol, {})
+
+
 @pytest.mark.parametrize(
     ("fake", "port"),
     [
@@ -118,6 +127,7 @@ class FakeUniverse:
         (FakeStore(), StoragePort),
         (FakeEventStore(), EventStorePort),
         (FakeUniverse(Universe([AAPL])), UniversePort),
+        (FakeCatalog(), CatalogPort),
     ],
 )
 def test_a_plain_class_satisfies_its_port(fake: object, port: type) -> None:
@@ -230,3 +240,9 @@ def test_fake_event_store_streams_in_sort_key_order() -> None:
 def test_fake_universe_returns_the_same_universe_it_was_given() -> None:
     universe = Universe([AAPL])
     assert FakeUniverse(universe).universe() is universe
+
+
+def test_fake_catalog_reports_absence_as_an_empty_mapping_not_an_error() -> None:
+    """An empty corpus is the ordinary state for most instruments during a
+    multi-week backfill — see `CatalogPort`'s docstring."""
+    assert FakeCatalog().bar_counts(AAPL, BarInterval.MIN_1) == {}

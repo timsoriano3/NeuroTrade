@@ -7,8 +7,9 @@ for the domain half.
 **Not in the spec.** §12.1 goes from "build the store" to "start the backfill crawler"
 and never defines trading hours, holidays or half days. Five modules defer to "the venue
 calendar" in comments and `DuckDBCatalog.missing_sessions` takes an expected-session list
-with no source. This is that missing piece, and the crawler is blocked on it: a crawler
+with no source. This is that missing piece, and the crawler was blocked on it: a crawler
 cannot know what to fetch without knowing which days should have data.
+`ingest/backfill.py` is where that wiring landed.
 
 ## `VenueCalendar` — the adapter
 
@@ -71,10 +72,17 @@ was not previously a direct dependency. pandas appears in this codebase only as 
 the timestamps the library hands back; nothing computes with it. Neither package ships a
 `py.typed` marker, so both carry a mypy override in `pyproject.toml`.
 
-## Not done yet
+## What calls it
 
-Nothing calls this. `sessions()` is the crawler's work queue once differenced against
-`missing_sessions` — but a work queue needs two axes, and the other one is the symbol list.
-`core/universe.py` is that second axis and landed first; the wiring itself, plus a CLI command
-and a make target, follows. Note the seam: `missing_sessions` takes `list[date]` while the port returns
-`tuple[date, ...]`, so one of the two needs widening when they are joined.
+`plan_backfill` in `ingest/backfill.py`, and nothing else. It asks `sessions()` for each venue in
+the universe, `session()` for the bounds of each of those days, and compares
+`TradingSession.expected_bars` against what the corpus holds.
+
+It does **not** go through `DuckDBCatalog.missing_sessions`, which earlier drafts of this doc
+predicted it would. That method answers "which expected dates are absent", and absent is not the
+same as incomplete — an interrupted fetch leaves a session present and short.
+`CatalogPort.bar_counts` answers with counts instead, so the `list` versus `tuple` seam recorded
+here was bypassed rather than resolved. It still applies to whatever does call
+`missing_sessions`, which for now is only the Phase 1 quality gate.
+
+Still open: the loop that drains the queue, a CLI command and a make target.

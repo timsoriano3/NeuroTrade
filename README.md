@@ -80,15 +80,16 @@ TypeScript arrive in Phase 3 for the dashboard.
 ```
 src/neurotrade/
   core/         the domain model — depends on nothing else
-  adapters/     storage and the IBKR broker; data feeds still to come
+  adapters/     storage, the IBKR broker, the venue calendar, the universe
   features/     calculations shared by research and live
   strategies/   one module per strategy
   lab/          measuring a strategy honestly; replay lives here
+  ingest/       building the corpus — which sessions are still missing
   bus.py        delivers events to subscribers
   config.py     environment profiles
   logs.py       structured logging
   cli.py        the `neurotrade` command
-config/         profile files
+config/         profile files, and the seed universe
 scripts/        one-off tools, not part of the package
 tests/fixtures/ a recorded session, replayed by CI
 ```

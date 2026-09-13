@@ -85,6 +85,19 @@ class (`xcals.ExchangeCalendar`, `pd.Timestamp`) — mypy still sees `Any` throu
 `ignore_missing_imports`, but the signature documents what it is. Untyped packages also need an
 override block in `pyproject.toml` or strict mypy rejects the import.
 
+**YAML turns real tickers into booleans.** `yaml.safe_load` reads `ON`, `NO`, `OFF`, `TRUE`
+and `FALSE` as `bool`, in any case. `ON` is ON Semiconductor on NASDAQ — a live listing that
+arrives as `True`. Verified in-session; `Y` and `N` survive as strings. Quote such tickers in
+the file, and reject a non-string rather than calling `str()` on it: `str(True)` is `'True'`,
+which looks like a ticker, would be crawled forever and would never resolve.
+
+**import-linter cannot see an import inside a docstring.** Contracts are checked against the
+AST, and a doctest is a string literal. `ingest/backfill.py` had a doctest importing a concrete
+calendar adapter while its layer contract said core-only; `lint-imports` passed, and pytest ran
+the import anyway. The contract was not enforcing the thing its comment claimed. Doctests in a
+port-only layer use fakes; a real adapter belongs in the test file, where the dependency is
+visible.
+
 **The `ruff-on-edit` hook auto-fixes on an intermediate state.**
 Adding a name to `__all__` and its import in one edit, then defining the class in the next,
 loses the import: at the moment of the first edit nothing used it, so `ruff check --fix`

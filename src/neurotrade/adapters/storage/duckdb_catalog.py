@@ -221,6 +221,44 @@ class DuckDBCatalog:
         """
         return tuple(entry.session_date for entry in self.coverage(symbol, interval))
 
+    def bar_counts(
+        self, symbol: Symbol, interval: BarInterval = BarInterval.MIN_1
+    ) -> dict[date, int]:
+        """Bars held per session for one instrument.
+
+        Satisfies `CatalogPort`. A narrower query than `coverage` on purpose:
+        the crawler asks this once per symbol across the whole universe, and
+        the timestamps and source lists `coverage` also computes are work it
+        does not need.
+
+        Args:
+            symbol: Instrument to describe.
+            interval: Bar size.
+
+        Returns:
+            Session date to bar count, ascending, for sessions holding at least
+            one bar. Sessions with nothing held are absent rather than zero.
+
+        Example:
+            >>> import tempfile
+            >>> with tempfile.TemporaryDirectory() as directory:
+            ...     DuckDBCatalog(Path(directory)).bar_counts(AAPL)
+            {}
+        """
+        clause, parameters = self._symbol_clause(symbol)
+        rows = self._query(
+            f"""
+            SELECT session_date, count(*) AS bar_count
+            FROM read_parquet('{{glob}}')
+            WHERE interval = ? {clause}
+            GROUP BY session_date
+            ORDER BY session_date
+            """,
+            interval.value,
+            *parameters,
+        )
+        return {_as_date(row[0]): _as_int(row[1]) for row in rows}
+
     def missing_sessions(
         self,
         symbol: Symbol,

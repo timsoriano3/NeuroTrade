@@ -31,6 +31,10 @@ DuckDB queries the Parquet files in place; nothing is copied into a database.
   calendar. That now exists (`adapters/calendar/`) but is not yet wired in here.** This is the
   seam the corpus quality gate plugs into. Note `missing_sessions` takes `list[date]` while
   `CalendarPort.sessions` returns a tuple, so joining them needs one of the two widened.
+- `bar_counts()` — sessions to bar counts for one instrument. **This is what the crawler
+  actually uses**, not `missing_sessions`: absent and incomplete are different states, and only a
+  count separates a session nobody fetched from one a killed process left half written. Satisfies
+  `CatalogPort`.
 - `duplicate_timestamps()` — the correctness check that the dedupe key is doing its job.
 - `summary()` — corpus-wide counts.
 

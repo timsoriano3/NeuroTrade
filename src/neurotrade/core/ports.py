@@ -28,7 +28,7 @@ only holds for immediately-filled market orders.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
 from typing import Protocol, runtime_checkable
 
@@ -43,6 +43,7 @@ from neurotrade.core.universe import Universe
 __all__ = [
     "BrokerPort",
     "CalendarPort",
+    "CatalogPort",
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
@@ -372,5 +373,54 @@ class UniversePort(Protocol):
             A non-empty `Universe`. Emptiness is rejected at construction
             rather than returned, because every caller would read an empty
             universe as "nothing to do" and report success having done nothing.
+        """
+        ...
+
+
+@runtime_checkable
+class CatalogPort(Protocol):
+    """What the local corpus already holds.
+
+    Separate from `StoragePort` because the questions are different in kind.
+    That one moves bars in and out; this one describes the collection, which is
+    what the backfill crawler needs to decide what to fetch next and what §12.1
+    stage 5's quality gate needs to decide whether the corpus can be trusted.
+
+    Synchronous, like `StoragePort`, and for the same reason.
+
+    **An empty corpus is not an error.** During a backfill that runs for weeks,
+    "nothing yet" is the normal answer for most instruments. An implementation
+    that raised would make the crawler's own progress reporting the first thing
+    to break.
+
+    Example:
+        Conformance is structural — no import from this module is needed:
+
+        >>> class EmptyCatalog:
+        ...     def bar_counts(self, symbol, interval):
+        ...         return {}
+        >>> isinstance(EmptyCatalog(), CatalogPort)
+        True
+    """
+
+    def bar_counts(self, symbol: Symbol, interval: BarInterval) -> Mapping[date, int]:
+        """How many bars are held for each session of one instrument.
+
+        A count rather than a yes-or-no, because "held" and "complete" are not
+        the same thing: an interrupted fetch leaves a session with some of its
+        bars, and a crawler that treated presence as completeness would leave
+        those holes forever. Comparing the count against
+        `TradingSession.expected_bars` is what turns it into a decision, and
+        that comparison belongs to the caller, which has the calendar.
+
+        Args:
+            symbol: Instrument to describe.
+            interval: Bar size. Counts are per interval — a session holding
+                daily bars holds no minute bars.
+
+        Returns:
+            Session date to bar count, for sessions holding at least one bar.
+            Absent means none held. Empty when the corpus holds nothing for
+            this instrument, which is ordinary rather than exceptional.
         """
         ...

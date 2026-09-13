@@ -77,6 +77,7 @@ strategies/  core, features
 risk/        core
 ml/          core, features
 lab/         core, features, strategies, ml
+ingest/      core           — ports only, never a concrete adapter
 execution/   core, adapters
 discovery/   lab            — and NOTHING imports discovery/
 promotion/   core, ml, lab

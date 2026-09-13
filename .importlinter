@@ -86,6 +86,22 @@ forbidden_modules =
 # would have tied research to one storage backend. A shared need between two
 # layers belongs below both.
 
+[importlinter:contract:ingest-depends-only-on-core]
+name = ingest depends on core alone, through ports
+type = forbidden
+source_modules =
+    neurotrade.ingest
+forbidden_modules =
+    neurotrade.adapters
+    neurotrade.features
+    neurotrade.strategies
+    neurotrade.lab
+    neurotrade.cli
+# The backfill crawler drives IBKR and Parquet through ports, never through the
+# adapters themselves. An import of adapters/ibkr here would mean no test of the
+# work queue or the crawl loop could run without a Gateway login, and §12.1's
+# crawler runs for weeks — it is the last thing that should be hard to test.
+
 [importlinter:contract:the-bus-is-infrastructure]
 name = the event bus depends only on core
 type = forbidden
