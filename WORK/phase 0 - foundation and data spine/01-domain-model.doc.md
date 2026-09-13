@@ -93,7 +93,8 @@ with no source. This is that missing piece, and it blocks the crawler.
 
 ## `ports.py` — the hexagon's edges
 
-`MarketDataPort` `BrokerPort` `StoragePort` `EventStorePort` `CalendarPort`, all `Protocol`s.
+`MarketDataPort` `BrokerPort` `StoragePort` `EventStorePort` `CalendarPort` `UniversePort`,
+all `Protocol`s.
 Adapters implement them; the core never imports an adapter.
 
 `CalendarPort` is synchronous (a local computation over holiday rules, not a network round

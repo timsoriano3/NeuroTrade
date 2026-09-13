@@ -24,11 +24,13 @@ from neurotrade.core.ports import (
     EventStorePort,
     MarketDataPort,
     StoragePort,
+    UniversePort,
 )
 from neurotrade.core.types import Price, Quantity, Symbol, Venue
+from neurotrade.core.universe import Universe
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
-PORTS = [MarketDataPort, BrokerPort, StoragePort, EventStorePort]
+PORTS = [MarketDataPort, BrokerPort, StoragePort, EventStorePort, UniversePort]
 
 
 # ── Structural conformance ───────────────────────────────────
@@ -100,6 +102,14 @@ class FakeEventStore:
         )
 
 
+class FakeUniverse:
+    def __init__(self, universe: Universe) -> None:
+        self._universe = universe
+
+    def universe(self) -> Universe:
+        return self._universe
+
+
 @pytest.mark.parametrize(
     ("fake", "port"),
     [
@@ -107,6 +117,7 @@ class FakeEventStore:
         (FakeBroker(), BrokerPort),
         (FakeStore(), StoragePort),
         (FakeEventStore(), EventStorePort),
+        (FakeUniverse(Universe([AAPL])), UniversePort),
     ],
 )
 def test_a_plain_class_satisfies_its_port(fake: object, port: type) -> None:
@@ -214,3 +225,8 @@ def test_fake_event_store_streams_in_sort_key_order() -> None:
     store.append(later)
     store.append(earlier)
     assert [e.seq for e in store.stream(0, 200)] == [0, 1]
+
+
+def test_fake_universe_returns_the_same_universe_it_was_given() -> None:
+    universe = Universe([AAPL])
+    assert FakeUniverse(universe).universe() is universe

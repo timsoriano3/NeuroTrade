@@ -1,0 +1,78 @@
+# The seed tradable universe — the symbol axis of the backfill crawler's work
+# queue (TRADER_PLAN §12.1 stage 1).
+#
+# This is DATA, not configuration. It is deliberately not part of the config
+# hash: it grows from the few dozen names here to a few thousand discovered
+# ones, and folding it into the hash would churn the fingerprint stamped on
+# every trade record each time a ticker was added. A run records
+# `Universe.digest` instead.
+#
+# Membership here is a starting point, not a claim about what is worth trading.
+# §12.1 stage 3 replaces the hand-listing with yfinance-derived universe
+# history, and §5's Universe Selector eventually ranks candidates nightly.
+#
+# The venue is the LISTING venue, which is what makes a symbol unique — the
+# same ticker trades in two currencies on two venues. It is not IBKR's exchange
+# string; the adapter maps those (TSX becomes "TSE"). Nothing here has been
+# confirmed against IBKR's contract database yet: the first crawl is what
+# verifies it, and a symbol IBKR cannot resolve surfaces as an error rather
+# than as silence.
+#
+# QUOTE ANY TICKER YAML WOULD READ AS SOMETHING ELSE. `ON` parses as the
+# boolean true, `NO` and `OFF` as false — and `ON` is ON Semiconductor, a real
+# NASDAQ listing. The loader rejects a non-string rather than coercing it, so
+# the mistake is loud, but quoting avoids it in the first place.
+
+version: 1
+
+venues:
+  NASDAQ:
+    - AAPL
+    - AMD
+    - AMZN
+    - GOOGL
+    - INTC
+    - META
+    - MSFT
+    - NFLX
+    - NVDA
+    - "ON" # ON Semiconductor — unquoted this is the boolean true
+    - QQQ
+    - TSLA
+
+  NYSE:
+    - BA
+    - BAC
+    - CVX
+    - DIS
+    - F
+    - JNJ
+    - JPM
+    - KO
+    - MA
+    - PFE
+    - TD # Toronto-Dominion in USD; the same company is below in CAD
+    - UNH
+    - V
+    - WMT
+    - XOM
+
+  ARCA:
+    - IWM
+    - SPY
+
+  TSX:
+    - ABX
+    - BCE
+    - BMO
+    - BNS
+    - CM
+    - CNQ
+    - CNR
+    - CP
+    - ENB
+    - RY
+    - SHOP
+    - SU
+    - T # Telus. NYSE's "T" is AT&T — a different company, same ticker
+    - TD

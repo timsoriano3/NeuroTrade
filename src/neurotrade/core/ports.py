@@ -38,6 +38,7 @@ from neurotrade.core.events import Bar, BarInterval, Event
 from neurotrade.core.ids import OrderId
 from neurotrade.core.orders import Order
 from neurotrade.core.types import Symbol, Venue
+from neurotrade.core.universe import Universe
 
 __all__ = [
     "BrokerPort",
@@ -45,6 +46,7 @@ __all__ = [
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
+    "UniversePort",
 ]
 
 
@@ -330,5 +332,45 @@ class CalendarPort(Protocol):
 
         Returns:
             The session, or `None` if that date was not a trading day.
+        """
+        ...
+
+
+@runtime_checkable
+class UniversePort(Protocol):
+    """Which instruments the system is allowed to consider.
+
+    The *source* of a universe changes with every phase while the universe
+    itself does not. Phase 0 reads a hand-written file because §12.1 stage 1
+    needs a crawl queue before stage 3 has built any history. Later, §5's
+    Universe Selector ranks candidates nightly by relative volume, catalyst
+    tags and liquidity. Both answer the same question, so both sit behind this.
+
+    Synchronous, like `CalendarPort` and `StoragePort`: reading a local file or
+    a cached ranking is not a network round trip, and making it async would push
+    every research script into an event loop for nothing.
+
+    **Implementations must answer the same thing throughout a run.** A universe
+    that changed mid-crawl would make the work already done unattributable —
+    the corpus would hold symbols no recorded universe contains. Re-read between
+    runs, never within one.
+
+    Example:
+        Conformance is structural — no import from this module is needed:
+
+        >>> class FixedUniverse:
+        ...     def universe(self):
+        ...         return Universe([Symbol("AAPL", Venue.NASDAQ)])
+        >>> isinstance(FixedUniverse(), UniversePort)
+        True
+    """
+
+    def universe(self) -> Universe:
+        """The instruments in scope.
+
+        Returns:
+            A non-empty `Universe`. Emptiness is rejected at construction
+            rather than returned, because every caller would read an empty
+            universe as "nothing to do" and report success having done nothing.
         """
         ...

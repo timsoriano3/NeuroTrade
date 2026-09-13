@@ -22,6 +22,7 @@ src/neurotrade/
   adapters/
     storage/   schemas parquet_store duckdb_catalog event_store
     calendar/  venue_calendar
+    universe/  universe_file
     ibkr/      connection market_data broker pacing
   features/    registry            (registry only — no features defined yet)
   strategies/  base                (contract only — no strategies defined yet)
