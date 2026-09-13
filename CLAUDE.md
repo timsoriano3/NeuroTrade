@@ -32,10 +32,13 @@ or `grep -n` for the heading and `sed -n 'A,Bp'` that range.
 
 ### Checkpointing and clearing
 
-When a coherent body of work is finished — a phase, a subsystem, a gate — say so, propose the exact
-`WORK/phase <#> - <title>/<subtitle>.doc.md` path, and recommend writing it and clearing context
-before continuing. Then wait; the user decides. Use the `work-journal` skill; it dispatches the sonnet `work-journal` agent so the doc is not
-written at the session's peak context.
+**Journalling is part of every commit — do not ask.** Once a commit's work passes its gate and
+audits, run the `work-journal` skill *before* the commit handoff, so the WORK/ update lands in the
+same commit as the code it describes. Do it while the session still holds the decisions; after a
+clear, the brief has to be reconstructed. The skill dispatches the sonnet `work-journal` agent so
+the doc is not written at the session's peak context. Pick the doc path yourself — rewrite the
+existing subsystem doc, or name a new `WORK/phase <#> - <title>/<subtitle>.doc.md` — and state it
+in the handoff.
 
 **One commit per window, then clear.** A compaction resets the floor and the window regrows from
 there; clearing after a checkpoint does not. Two hooks raise this mechanically — one at turn end on work
@@ -207,8 +210,9 @@ Do **not** batch work into large commits, and do not commit anything yourself.
 
 1. Break the plan into a sequence of **small** commits, each logically complete on its own.
 2. Implement **one** commit's worth of changes, then stop.
-3. Write the commit handoff below.
-4. **Wait.** Do not begin the next commit until the user says they have committed and to proceed.
+3. Run the `work-journal` skill for this commit's work (see Checkpointing), without asking.
+4. Write the commit handoff below, covering code and WORK/ together.
+5. **Wait.** Do not begin the next commit until the user says they have committed and to proceed.
 
 The user commits. Claude never runs `git commit` unless explicitly asked.
 

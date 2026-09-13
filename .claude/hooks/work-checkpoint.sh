@@ -38,11 +38,10 @@ if (( commits >= 4 || lines >= 600 )); then
   cat >&2 <<MSG
 WORK checkpoint due: $commits commit(s) and $lines inserted line(s) since WORK/ was last written.
 
-Tell the user, in one short paragraph:
-  - what coherent body of work has accumulated (name it, do not list commits)
-  - the exact path you propose writing: WORK/phase <#> - <title>/<subtitle>.doc.md
-  - that you recommend writing it and then clearing context before continuing
-Then STOP and wait. Do not write the file until they agree.
+Journalling is part of every commit (CLAUDE.md, Checkpointing), so this means one was missed.
+Do not ask. Run the work-journal skill now for the unrecorded work, naming the doc path
+(WORK/phase <#> - <title>/<subtitle>.doc.md), then write the commit handoff for the WORK/ change
+and recommend clearing context once it is committed.
 MSG
   exit 2
 fi

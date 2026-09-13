@@ -1,10 +1,11 @@
 # The backfill crawler
 
-§12.1 stage 1: "pacing-aware, resumable, runs continuously". **Two of the three halves exist —
-what to fetch. Nothing fetches yet.** The loop, a CLI command and a make target are open.
+§12.1 stage 1: "pacing-aware, resumable, runs continuously". **All three parts now exist** —
+universe, work queue, and the fetch loop. Open: a CLI command, a make target, and the history
+window to run it with. The corpus is still empty; nothing has run against a live Gateway.
 
 The spec defines neither the universe nor a calendar, and the crawler needs both. The calendar
-is `09-venue-calendar.doc.md`; the universe is here.
+is `09-venue-calendar.doc.md`; the universe and queue are here.
 
 ## The symbol axis
 
@@ -14,48 +15,69 @@ construction, with `venues`, `by_venue` and a BLAKE2b `digest`.
 - **Keyed on `Symbol`, never on ticker.** TD is Toronto-Dominion on both NYSE in USD and TSE in
   CAD. One entry per ticker would average two currencies into one series.
 - **Empty is rejected.** Downstream, an empty universe reads as "nothing to do", so a crawler
-  would report a complete corpus having done nothing. Same refusal as the calendar's for an
-  out-of-horizon date, for the same reason.
-- **`digest` exists because the universe is data, not configuration.** It grows from tens of
-  names to thousands; folding it into the config hash would churn the fingerprint stamped on
-  every trade record. A run records the digest instead. `sorted(set(...))` at construction is
-  what makes it reproducible.
+  would report a complete corpus having done nothing.
+- **`digest` exists because the universe is data, not configuration.** Folding it into the
+  config hash would churn the fingerprint stamped on every trade record; a run records the
+  digest instead.
 
 `adapters/universe/universe_file.py` — `UniverseFile` implements `UniversePort`, parsing
-`config/universe.yaml` eagerly so a typo fails startup rather than the first fetch. Every
-malformed file raises: unknown venue, `SMART`, a repeated ticker, a ticker `Symbol` refuses, a
-wrong version, no symbols at all.
-
-The committed seed file holds **43 symbols across ARCA, NASDAQ, NYSE and TSX**, digest
-`2ea7e3533356185d`. Its venues are unverified against IBKR's contract database; the first crawl
-is what confirms them. `UniversePort` exists rather than a bare loader because the *source*
-changes by phase — a file now, yfinance history at stage 3, §5's Universe Selector later —
-while the value returned does not.
+`config/universe.yaml` eagerly so a typo fails startup rather than the first fetch. The
+committed seed file holds 43 symbols across ARCA, NASDAQ, NYSE and TSX, digest
+`2ea7e3533356185d`, **unverified against IBKR's contract database** — the first crawl is what
+confirms them.
 
 ## The work queue
 
 `ingest/backfill.py` — `plan_backfill(universe, calendar, catalog, start=, end=, interval=)`
 yields `BackfillCell`s, each one instrument-session-interval, carrying the session itself so the
-fetch window and the expected bar count come from the day's real bounds.
+fetch window and expected bar count come from the day's real bounds.
 
 **Resumable with no state of its own.** The queue is recomputed from the calendar and from what
-is on disk, so **the corpus is its own progress record**. Writes are idempotent, so re-fetching
-covered ground costs a request and changes nothing, and a process killed mid-session resumes by
-noticing the session is short. A checkpoint file that disagreed with the data would be worse
-than none.
+is on disk — **the corpus is its own progress record.** Writes are idempotent, so re-fetching
+covered ground costs a request and changes nothing.
 
-**Held is not complete**, which is why `CatalogPort` returns counts. `DuckDBCatalog.bar_counts`
-is one grouped query per symbol, not per session. `missing_sessions` is deliberately *not* used:
-it answers which expected dates are absent, and an interrupted fetch leaves a session present
-and short.
+**Held is not complete**, which is why `CatalogPort` returns counts rather than a set of dates:
+an interrupted fetch leaves a session present and short, not absent.
 
-**Order is recency-major** — every symbol's most recent session before any symbol's older ones.
-An interrupted crawl then leaves a corpus shallow across the whole universe rather than deep for
-one end of the alphabet, and a cross-sectional study can use the first and not the second.
+**Order is recency-major** — every symbol's most recent session before any symbol's older ones,
+so an interrupted crawl leaves the corpus shallow across the whole universe rather than deep for
+one end of the alphabet.
 
-`ingest/` depends on **core alone**, through ports, with its own `.importlinter` contract. The
-crawler is specified to run for weeks; if its loop could only run against a logged-in Gateway it
-would be the least tested code in the repo.
+## The fetch loop
+
+`ingest/crawler.py` — `crawl(universe, calendar, catalog, feed, store, *, start, end, source,
+interval=, limit=, max_consecutive_failures=, on_outcome=)` drains one plan through
+`MarketDataPort` into `StoragePort` and returns a `CrawlReport` (per-cell `CellOutcome`s, plus
+`requests`, `bars_written`, `completed`).
+
+- **One call is one pass: plan, drain, return.** Continuous running is the caller looping
+  passes, not a loop inside `crawl` — the plan is a snapshot, and a week-long crawl should
+  re-read the corpus rather than trust a queue computed days ago.
+- **`order_cells` sorts untouched sessions before short ones**, stably, so recency-major order
+  survives within each group. A short session may be a halt the corpus can't recognise yet
+  (see Known limitation below); re-requesting it likely returns the same shortfall, so spending
+  budget on never-fetched sessions first grows the corpus faster.
+- **No pacer in the loop.** `MarketDataPort` requires adapters to self-pace, and
+  `IbkrMarketData` already awaits its own `HistoricalPacer`. A second limiter here would count
+  the same requests twice and halve throughput for nothing.
+- **Fetch window is `(session.open_ns + 1, session.close_ns + 1)`.** The port's range is
+  `[start, end)` on `ts_event`, but a session's bars close in `(open, close]` — a bar closing
+  exactly at the bell belongs to the previous session. Shifting both bounds by one nanosecond
+  asks for exactly this session and nothing either side.
+- **Re-trimmed with `session.holds_bar` after fetch**, not just requested with the right
+  window: a bar an adapter files under the wrong session date is invisible to the plan (which
+  counts by date) and would sit in the corpus looking like a complete day.
+- **Failure handling is per-symbol, then per-pass.** A bar for the wrong symbol or interval is
+  `ValueError` — a broken adapter, never a missing listing. A feed exception marks the cell
+  `FAILED` and skips that symbol for the rest of the pass (an unresolvable listing fails
+  identically every session, so retrying it per-date buys nothing). Five consecutive failures
+  end the pass — a dead Gateway, not a bad listing. Store errors and `CancelledError` (a
+  `BaseException`) both propagate rather than being recorded, since a local fault (full disk,
+  killed process) would hit every later cell too.
+- **`source: str`, not the storage `Source` enum** — that enum lives in the adapter, and
+  `ingest/` may only import `core`.
+- **No clock, no state.** Nothing here reads the time or remembers what it did; the next pass's
+  plan observes whatever the store now holds.
 
 ## Known limitation, by design
 
@@ -67,16 +89,14 @@ silently accept short data everywhere to paper over one case.
 
 ## Not done
 
-- **The loop.** Drain the queue through `HistoricalPacer` into `ParquetStore`, via
-  `MarketDataPort` and `StoragePort`. `BackfillCell.is_untouched` is there so the loop can
-  prefer never-fetched sessions over merely short ones.
-- **CLI command, make target, and the history window.** Open question: a declared value in
-  `base.yaml`, or a required argument with no default. A default silently decides how much data
-  the corpus has.
+- **CLI command and make target** to run `crawl` against IBKR. Open question: the history
+  window as a declared value in `base.yaml`, or a required `--start` argument with no default —
+  leaning required, since a default would silently decide how much data the corpus has.
 - **Stages 2 and 3** — FirstRateData and Kibot samples, then yfinance daily bars and universe
   history. `Source` already has values for all three.
 
 ## Verified
 
-`make check` 961 tests, `lint-imports` 7 contracts kept, `make docs-check` 33 documents.
-Traps found building this are in `08-gotchas.doc.md` under Tooling.
+Reported by the session that built the crawler, pre-commit: `make check` 997 tests (30 in
+`test_crawler.py`), `lint-imports` 7 contracts kept, `make docs-check` 34 documents. Traps found
+building `ingest/` are in `08-gotchas.doc.md`; none new this session.

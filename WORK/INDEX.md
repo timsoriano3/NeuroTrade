@@ -15,10 +15,11 @@ Phase 0 exit gates, both verified:
 - **G1** — a session replays bit-for-bit. `make verify-replay` → `4f58fe2c99cd26dc7cbb8faf033a39d1`
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
-Phase 0 work still open (§12.1): the backfill crawler's **fetch loop**, free sample seed data,
-and yfinance daily bars plus universe history. What the crawler should fetch is now decided —
-universe, calendar and work queue all exist, none of it in the spec. Nothing fetches yet. See
-`10-backfill-crawler.doc.md`. The corpus quality gate is **Phase 1**, not Phase 0.
+Phase 0 work still open (§12.1): the backfill crawler's **CLI command and make target**, free
+sample seed data, and yfinance daily bars plus universe history. Universe, calendar, work queue
+and fetch loop all exist — none of it in the spec — but nothing has run against a live Gateway,
+so the corpus is still empty. See `10-backfill-crawler.doc.md`. The corpus quality gate is
+**Phase 1**, not Phase 0.
 
 ## Phase 0 — foundation and data spine
 
