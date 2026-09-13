@@ -36,6 +36,7 @@ gate is **Phase 1**, not Phase 0.
 | `07-tooling-ci-docs.doc.md` | Makefile, pre-commit, CI, import-linter, `docs-check` | Changing the build |
 | `09-venue-calendar.doc.md` | `core/calendar.py`, `adapters/calendar/`, why the spec has no calendar | Touching sessions or the crawler |
 | `10-backfill-crawler.doc.md` | `core/universe.py`, `adapters/universe/`, `ingest/backfill.py` | Building the corpus |
+| `11-seed-data.plan.md` | **Plan** for §12.1 stage 2 — FirstRateData + Kibot samples, where they live, commit sequence | Starting seed-data work |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Non-obvious traps with their fixes | **Before writing code — highest value per token** |
 
 ## Why the working agreements exist
