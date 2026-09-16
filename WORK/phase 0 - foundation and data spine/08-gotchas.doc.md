@@ -82,6 +82,32 @@ full of `ib_insync` answers. Use context7 for this API rather than recall.
 **Gateway ≠ TWS.** Gateway has no "Enable ActiveX and Socket Clients" checkbox; its socket is
 always on. Gateway's API mode must be **IB API**, not FIX CTCI.
 
+## Vendor sample files
+
+**python.org's macOS Python ships with no CA certificates.** `urllib.request.urlopen` on HTTPS
+fails with `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate` until the
+interpreter's `Install Certificates.command` is run by hand — which a fresh clone on another
+machine will not have done. Fix: build the context explicitly,
+`ssl.create_default_context(cafile=certifi.where())`. Found only because a live fetch was tried;
+every unit test passed with a fake opener.
+
+**Both vendors stamp a bar at its OPEN, in Eastern time.** Verified from the files, not the
+docs: FRD runs 04:00–19:59 with no 20:00 bar, Kibot 09:30–15:59 with no 16:00. Same shift as
+IBKR — add one interval to reach the close — and the same silent lookahead if skipped.
+
+**Kibot's free sample is a rolling window, not a fixed snapshot.** The file holds the last ~3
+months and changes under you; two fetches are different data, so every fetch is stored in its
+own dated folder.
+
+**Kibot download links carry no filename.** The page lists opaque `api.kibot.com/?get=<code>`
+links and the real name arrives only on the `Content-Disposition` header, so the wanted file has
+to be identified by opening each link. The codes can rotate; a fetch that matches nothing must
+fail loudly rather than silently seeding an empty corpus.
+
+**Kibot's default files are split- and dividend-adjusted.** The `_unadjusted` variants differ —
+IBM's first open on 2026-06-15 is 272.00 unadjusted against 270.06 adjusted. Raw must stay raw:
+take the `_unadjusted` files, since adjustment is the stage 5 quality gate's job.
+
 ## Logging
 
 **structlog caches its logger factory on first use.**

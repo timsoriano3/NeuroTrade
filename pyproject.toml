@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.14"
 # Every dependency is added by the commit that introduces the code needing it,
 # so `git log -p pyproject.toml` reads as a history of why each one is here.
 dependencies = [
+    "certifi>=2026.7.22",
     "duckdb>=1.5.5",
     "exchange-calendars>=4.13.2",
     "ib-async>=2.1.0",

@@ -23,6 +23,7 @@ src/neurotrade/
     storage/   schemas parquet_store duckdb_catalog event_store
     calendar/  venue_calendar
     universe/  universe_file
+    feeds/     seed_sources vendor_download firstrate kibot   (§12.1 stage 2 samples)
     ibkr/      connection market_data broker pacing
   features/    registry            (registry only — no features defined yet)
   strategies/  base                (contract only — no strategies defined yet)
@@ -30,7 +31,7 @@ src/neurotrade/
   ingest/      backfill crawler    (queue + fetch loop, run via `ibkr backfill` / `make backfill`)
   bus.py config.py logs.py cli.py
 ```
-~16.2k lines across `src`, `tests`, `scripts`, `config`. Tests sit beside every module.
+~21.4k lines across `src`, `tests`, `scripts`, `config`. Tests sit beside every module.
 
 The **trading calendar** is built in both halves and is **not in the spec at all** — §12.1 is
 silent on trading hours, holidays and half days, while `missing_sessions()` in `DuckDBCatalog`
@@ -50,8 +51,9 @@ Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is 
   IBKR's data-farm outage — first as a hang with no timeout, then (after adding
   `request_timeout_seconds`, see `08-gotchas.doc.md`) as a clean per-cell failure — see
   `10-backfill-crawler.doc.md`. What is left is a weekday crawl with the farms up.
-- **Free sample seed data** (§12.1 stage 2) — FirstRateData / Kibot samples, so the lab has
-  something to work with before the crawler has run.
+- **Free sample seed data** (§12.1 stage 2) — the feeds exist and read both vendors'
+  files (`12-seed-feeds.doc.md`); missing are the `seed fetch` / `seed ingest` commands, so
+  nothing is in the corpus yet.
 - **yfinance daily bars and universe history** (§12.1 stage 3) — including `.TO` tickers.
 
 Corpus target before Phase 5: 3–5 years of 1-minute bars across US + TSX, ~2,000 symbols,

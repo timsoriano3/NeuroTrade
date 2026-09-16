@@ -1,7 +1,6 @@
 # Why the working agreements say what they say
 
-The rules in `CLAUDE.md` about delegation, batching, model tiers and clearing are not
-preferences. This is the evidence behind them, kept here so `CLAUDE.md` can state the rule
+The rules in `CLAUDE.md` about batching, model tiers and clearing are not preferences. This is the evidence behind them, kept here so `CLAUDE.md` can state the rule
 and stop — it is injected into every request, and an argument only needs making once.
 
 ## How a session is billed
@@ -13,8 +12,9 @@ Two consequences, both counter-intuitive:
 
 - A tool call that returns a lot is charged **twice** — once for the call, and again on
   every later request, because its output now sits in context permanently.
-- A subagent's context is discarded; only its return value arrives. Delegation is therefore
-  a **compression** mechanism, not merely a parallelism one.
+- A subagent's context is discarded; only its return value arrives — so delegation *compresses*
+  output, but it pays for a cold agent to re-derive context the caller already holds. Which
+  effect dominates is an empirical question; see the reversal below.
 
 ## Measurement one — 2026-09-10
 
@@ -41,8 +41,10 @@ The usage dashboard reported "99% of your usage came from subagent-heavy session
 own per-agent breakdown summed to **5%**. That line labels the session, it does not attribute
 the cost. The agents were not the expense; the window they ran in was.
 
-**Conclusion: delegation is working and should not be cut back.** The remaining levers are
-the length of a window and the model running it.
+**Conclusion at the time: delegation is working and should not be cut back.** The remaining
+levers are the length of a window and the model running it. **Superseded 2026-09-15 — see the
+reversal below.** The evidence here was never direct: subagent token use was not measurable from
+the transcripts, so "the agents were not the expense" was an inference from what could be seen.
 
 ## Measurement three — 2026-09-12
 
@@ -62,10 +64,36 @@ subagents ignore — the key is `tools:` — so every agent was carrying every t
 Downgrading agent tiers was rejected: three are already haiku, and the sonnet ones are
 judgement work whose total share is small.
 
+## Reversal — 2026-09-15: subagents retired
+
+The user's call, on observed burn: **agents were costing more than working in the main thread,
+because each one starts cold and re-derives context this session already holds.** What the
+notifications showed directly this session:
+
+- One implementation agent (the seed feeds commit) reported **196,396 subagent tokens** over 78
+  tool calls — more than the main window had spent on the whole session to that point.
+- A routine `make check` was worth ~17k agent tokens each time it ran, for one line of result.
+- Three audit agents dispatched together all hit the 600s stall watchdog; two returned nothing
+  at all, and the work was redone inline in a handful of `grep` calls.
+
+Measurement two's "the agents were not the expense" rested on a dashboard whose per-agent
+breakdown could not be audited. The direct numbers above point the other way.
+
+**What replaced them.** Every retired agent's method is now a procedure in `CLAUDE.md` under
+Working procedures — spec slicing, library research, test style, the invariant and docs-drift
+audits, the methodology review checklist — and the `work-journal` and `commit-handoff` skills do
+the work inline instead of dispatching. The definitions themselves are kept out of the repo in
+`~/.claude/agents-retired/`, and the project ones remain in git history at `.claude/agents/`.
+
+**What carries over unchanged.** The reason the agents existed is still real: long tool output in
+the window is charged on every later request. So the discipline moved rather than disappeared —
+locate with `grep -n` and slice with `sed -n`, send gate output to a log file and grep it, batch
+independent calls, and clear between commits.
+
 ## What follows from this
 
-- **Hard triggers, not judgement.** A rule that says "delegate when it seems worth it" loses
-  to the pull of just reading the file. The table in `CLAUDE.md` names the triggers.
+- **Keep the output out, not the work.** The lever was never who did the work; it was how much
+  text landed in the window. Procedures in `CLAUDE.md` name the method for each recurring task.
 - **Batching.** N sequential independent calls are N full-context requests; the same N issued
   in one message is one.
 - **Model tiers.** Cache read is most of the bill, so the model running the conversation sets

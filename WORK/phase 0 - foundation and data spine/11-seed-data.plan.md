@@ -56,16 +56,17 @@ Detail docs get written per commit; this is the map.
 
 ## Commits
 
-1. *feeds: vendor_download*: FRD URL pattern, Kibot page scrape, manifest, dated
-   folders. `config/seed_sources.yaml`. `neurotrade seed fetch` + *make seed-fetch*.
-2. *feeds: firstrate*: `FirstRateFeed` (MarketDataPort) — parse, ET→UTC, open→close,
-   RTH trim.
-3. *feeds: kibot*: `KibotFeed`, same contract, headerless `MM/DD/YYYY,HH:MM`.
-4. `neurotrade seed ingest` + *make seed*: `crawl` each source into
-   `derived/seed/<source>/`; log the manifest sha256 on each pass.
-5. Checks: IBM (Kibot unadjusted) vs the IBKR crawl on overlapping sessions, to confirm both
-   the stamp shift and the price basis. FRD AAPL close vs yfinance around an ex-dividend date
-   settles the adjustment question. Record the results in `08-gotchas` either way.
+Grouped by scope — two, not five.
+
+1. **Seed feeds** (adapters, one scope) — **DONE, see `12-seed-feeds.doc.md`**: *feeds: vendor_download* (FRD URL pattern, Kibot page
+   scrape, manifest, dated folders), *feeds: firstrate* and *feeds: kibot* — file-backed
+   `MarketDataPort` feeds: parse, ET→UTC, open→close, RTH trim — plus
+   `config/seed_sources.yaml` and the feeds README. Tests on hand-written vendor rows.
+2. **Seed commands and verification**: `neurotrade seed fetch` / `seed ingest` + *make seed*,
+   `crawl` each source into `derived/seed/<source>/` logging manifest sha256; a live fetch and
+   ingest; checks — Kibot IBM unadjusted vs the IBKR crawl on overlapping sessions (stamp
+   shift, price basis), FRD AAPL vs yfinance around an ex-dividend date (adjustment). Results
+   to `08-gotchas` either way. The IBKR overlap check waits for a weekday crawl if not yet run.
 
 ## Not in this stage
 

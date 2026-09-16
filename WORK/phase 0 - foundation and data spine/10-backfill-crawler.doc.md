@@ -136,7 +136,6 @@ farms up.
 
 ## Verified
 
-`make check` PASS, 1014 tests; `invariant-auditor` found nothing; `docs-drift-auditor` found
-nothing. **Not verified live:** the 43-symbol universe against IBKR's contract database — every
+`make check` PASS, 1014 tests; the invariant and docs-drift audits found nothing. **Not verified live:** the 43-symbol universe against IBKR's contract database — every
 live attempt so far has hit the weekend data-farm outage before qualifying anything, so it
 neither confirms nor refutes the seed file.

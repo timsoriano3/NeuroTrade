@@ -1,0 +1,78 @@
+# Seed vendor files — free intraday samples that give the lab something to
+# work with before the IBKR backfill has run long enough to matter
+# (TRADER_PLAN §12.1 stage 2).
+#
+# Each entry maps one vendor file to a `Symbol`: which vendor served it, the
+# ticker, the LISTING venue, and the file name as the vendor serves it (Kibot
+# actually names its files via Content-Disposition — the name here is the one
+# `vendor_download.py` asks the fetch to keep, not a URL).
+#
+# Both licences forbid redistribution, so nothing this file points at is
+# committed — `data/` is already gitignored, and tests use a few hand-written
+# rows in each vendor's own format.
+#
+# QUOTE ANY TICKER YAML WOULD READ AS SOMETHING ELSE. `ON`, `NO` and `OFF`
+# parse as booleans unquoted. None of the tickers below happen to collide, but
+# the loader rejects a non-string ticker outright rather than guessing.
+
+version: 1
+
+entries:
+  # FirstRateData: https://firstratedata.com/i/free — fixed one-year window,
+  # 2022-09-30 to 2023-09-29 (AAPL, verified 2026-09-12). File names follow
+  # {TICKER}_1min_sample_firstratedata.zip; adjustment basis is unverified for
+  # the sample (manifest records "unknown" until checked — see decision 7 and
+  # the "Open" section of 11-seed-data.plan.md).
+  - source: firstrate
+    ticker: AAPL
+    venue: NASDAQ
+    file: AAPL_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: AMZN
+    venue: NASDAQ
+    file: AMZN_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: MSFT
+    venue: NASDAQ
+    file: MSFT_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: META
+    venue: NASDAQ
+    file: META_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: TSLA
+    venue: NASDAQ
+    file: TSLA_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: QQQ
+    venue: NASDAQ
+    file: QQQ_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: SPY
+    venue: ARCA
+    file: SPY_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: DIA
+    venue: ARCA
+    file: DIA_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: EEM
+    venue: ARCA
+    file: EEM_1min_sample_firstratedata.zip
+  - source: firstrate
+    ticker: VXX
+    venue: BATS # unverified — settle with an IBKR qualify (decision 9)
+    file: VXX_1min_sample_firstratedata.zip
+
+  # Kibot: https://www.kibot.com/free-historical-intraday-data.html — rolling
+  # ~3 month window (IBM ran 2026-06-15 to 2026-09-11, verified 2026-09-12).
+  # `_unadjusted` files only (decision 7): adjusting is stage 5's job and raw
+  # must stay raw.
+  - source: kibot
+    ticker: IBM
+    venue: NYSE
+    file: IBM_unadjusted.txt
+  - source: kibot
+    ticker: OIH
+    venue: ARCA # unverified — settle with an IBKR qualify (decision 9)
+    file: OIH_unadjusted.txt

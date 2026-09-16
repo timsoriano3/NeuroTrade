@@ -66,5 +66,5 @@ Docs drift because nothing fails when they go stale. This fails. Four checks:
 
 Restricted to fenced and inline code spans, so ordinary prose does not trip it.
 
-**What it cannot check is whether a sentence is still true.** That gap is real, and is what the
-`docs-drift-auditor` subagent exists to cover.
+**What it cannot check is whether a sentence is still true.** That gap is real, and is covered by
+the docs-drift pass in `CLAUDE.md`'s working procedures, run by hand before every handoff.

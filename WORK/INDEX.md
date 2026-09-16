@@ -15,8 +15,8 @@ Phase 0 exit gates, both verified:
 - **G1** — a session replays bit-for-bit. `make verify-replay` → `4f58fe2c99cd26dc7cbb8faf033a39d1`
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
-Phase 0 work still open (§12.1): the first successful live backfill crawl, free sample seed
-data, and yfinance daily bars plus universe history. Universe, calendar, work queue, fetch loop,
+Phase 0 work still open (§12.1): the first successful live backfill crawl, the seed-data
+commands (`seed fetch` / `seed ingest`), and yfinance daily bars plus universe history. Universe, calendar, work queue, fetch loop,
 the `ibkr backfill` / `make backfill` command and a per-request IBKR timeout all exist — none of
 it in the spec — but every live attempt has hit IBKR's weekend data-farm outage, so the corpus
 is still empty. See `10-backfill-crawler.doc.md` and `08-gotchas.doc.md`. The corpus quality
@@ -36,13 +36,15 @@ gate is **Phase 1**, not Phase 0.
 | `07-tooling-ci-docs.doc.md` | Makefile, pre-commit, CI, import-linter, `docs-check` | Changing the build |
 | `09-venue-calendar.doc.md` | `core/calendar.py`, `adapters/calendar/`, why the spec has no calendar | Touching sessions or the crawler |
 | `10-backfill-crawler.doc.md` | `core/universe.py`, `adapters/universe/`, `ingest/backfill.py` | Building the corpus |
-| `11-seed-data.plan.md` | **Plan** for §12.1 stage 2 — FirstRateData + Kibot samples, where they live, commit sequence | Starting seed-data work |
+| `11-seed-data.plan.md` | **Plan** for §12.1 stage 2 — vendor facts, where files live, commit sequence | Starting seed-data work |
+| `12-seed-feeds.doc.md` | `adapters/feeds/` — FirstRateData + Kibot sample feeds, the ET-open conversion, provenance | Touching seed data |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Non-obvious traps with their fixes | **Before writing code — highest value per token** |
 
 ## Why the working agreements exist
 
-`cost-and-delegation.doc.md` — the measurements behind the delegation, batching, model-tier and
-clearing rules in `CLAUDE.md`, and the hooks that enforce them. Read it before changing any of them.
+`cost-and-delegation.doc.md` — the measurements behind the batching, model-tier and clearing rules
+in `CLAUDE.md`, the hooks that enforce them, and why subagents were retired. Read it before
+changing any of them.
 
 ## Conventions
 
