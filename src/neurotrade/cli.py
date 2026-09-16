@@ -471,9 +471,12 @@ def ibkr_backfill(
 
     bars_root = settings.storage.raw_dir / "bars"
 
+    # Built outside the coroutine so the feed's own reconciliation counters can
+    # be read after the crawl, not just during it.
+    connection = IbkrConnection(settings.ibkr)
+    feed = IbkrMarketData(connection, clock)
+
     async def run() -> list[CrawlReport]:
-        connection = IbkrConnection(settings.ibkr)
-        feed = IbkrMarketData(connection, clock)
         store = ParquetStore(bars_root, clock)
         catalog = DuckDBCatalog(bars_root)
         # The same calendar across passes: building one is the expensive part.
@@ -513,6 +516,10 @@ def ibkr_backfill(
         raise typer.Exit(code=1) from error
 
     last_report = reports[-1]
+    for symbol, drop in sorted(feed.vwap_drops().items()):
+        # IBKR's VWAP fell outside the bar's own high/low. The bar was kept and
+        # the field dropped; a worst excess of a cent or more is not rounding.
+        typer.echo(f"vwap      {symbol} dropped {drop.count}, worst {drop.worst_excess}", err=True)
     typer.echo(f"passes    {len(reports)}, last planned {last_report.planned} cells", err=True)
     typer.echo(f"corpus    {bars_root}", err=True)
     if not last_report.completed:

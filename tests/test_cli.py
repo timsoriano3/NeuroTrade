@@ -11,9 +11,10 @@ import hashlib
 import io
 import json
 import zipfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar
 
@@ -29,6 +30,7 @@ from neurotrade.adapters.feeds.seed_sources import SeedSource
 from neurotrade.adapters.feeds.vendor_download import latest_snapshot, read_manifest
 from neurotrade.adapters.feeds.yfinance_daily import DailyRow
 from neurotrade.adapters.ibkr.connection import IbkrConnectionError
+from neurotrade.adapters.ibkr.market_data import VwapDrop
 from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.cli import _SEED_PROVENANCE, _seed_feed, _SeedJob, app
 from neurotrade.config import Profile, config_hash, load_settings
@@ -347,6 +349,7 @@ class _FeedLog:
     calls: list[tuple[Symbol, BarInterval, int, int]] = field(default_factory=list)
     bars: dict[Symbol, tuple[Bar, ...]] = field(default_factory=dict)
     raise_on_fetch: Exception | None = None
+    vwap_drops: dict[Symbol, VwapDrop] = field(default_factory=dict)
 
 
 def _patch_ibkr(
@@ -384,6 +387,11 @@ def _patch_ibkr(
 
         async def is_connected(self) -> bool:
             return True
+
+        def vwap_drops(self) -> Mapping[Symbol, VwapDrop]:
+            # Adapter surface, not port surface: the command reads it off the
+            # concrete feed, so the stand-in has to carry it too.
+            return feed_log.vwap_drops
 
     monkeypatch.setattr("neurotrade.cli.IbkrConnection", FakeConnection)
     monkeypatch.setattr("neurotrade.cli.IbkrMarketData", FakeMarketData)
@@ -614,6 +622,38 @@ def test_extra_passes_stop_once_the_next_plan_is_empty(
     # and makes none.
     assert len(feed_log.calls) == 1
     assert "passes    2, last planned 0 cells" in result.stderr
+
+
+def test_a_dropped_vwap_is_reported_to_the_operator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A VWAP the feed contradicted is a data-quality fact, so it has to reach a
+    human rather than only the bar that quietly lost the field."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL"]})
+    symbol = Symbol("AAPL", Venue.NASDAQ)
+    feed_log = _FeedLog(
+        bars={symbol: _session_bars(symbol, _HALF_DAY)},
+        vwap_drops={symbol: VwapDrop(count=3, worst_excess=Decimal("0.006"))},
+    )
+    _patch_ibkr(monkeypatch, _ConnectionLog(), feed_log)
+
+    result = runner.invoke(
+        app,
+        [
+            "ibkr",
+            "backfill",
+            "--start",
+            "2024-07-03",
+            "--end",
+            "2024-07-03",
+            "--universe",
+            str(universe_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "vwap      AAPL.NASDAQ dropped 3, worst 0.006" in result.stderr
 
 
 def test_a_pass_that_gives_up_exits_nonzero_and_runs_no_further_passes(

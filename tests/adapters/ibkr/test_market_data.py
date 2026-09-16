@@ -20,6 +20,7 @@ from neurotrade.adapters.ibkr.market_data import (
     IBKR_EXCHANGE,
     IbkrMarketData,
     MarketDataError,
+    VwapDrop,
 )
 from neurotrade.adapters.ibkr.pacing import HistoricalPacer
 from neurotrade.config import IbkrSettings
@@ -107,6 +108,81 @@ async def test_a_bar_that_did_not_trade_has_no_vwap() -> None:
     bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
     assert bars[0].vwap is None
     assert bars[0].volume.is_zero
+
+
+# ── A VWAP that contradicts its own bar ──────────────────────
+#
+# Live, 2026-09-15: IBKR returned JPM with average=344.576 against a high of
+# 344.57, `Bar` refused it, and the whole 390-bar session was lost. These bars
+# are built by hand because `a_bar` pins average to close, which is the one
+# thing that cannot be true here.
+
+
+def a_bar_with_vwap(minute: int, *, average: float, high: float, low: float) -> FakeBarData:
+    """A bar whose VWAP is set independently of its range."""
+    return FakeBarData(
+        date=datetime(2026, 3, 16, 13, 30 + minute, tzinfo=UTC),
+        open=low,
+        high=high,
+        low=low,
+        close=high,
+        volume=1000.0,
+        average=average,
+        barCount=42,
+    )
+
+
+async def test_a_vwap_above_the_high_is_dropped_rather_than_rejecting_the_bar() -> None:
+    feed, _ = a_feed(bars=[a_bar_with_vwap(0, average=344.576, high=344.57, low=344.43)])
+    bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert len(bars) == 1
+    assert bars[0].vwap is None
+    assert bars[0].high == Price("344.57")
+
+
+async def test_a_vwap_below_the_low_is_dropped_too() -> None:
+    feed, _ = a_feed(bars=[a_bar_with_vwap(0, average=344.42, high=344.57, low=344.43)])
+    bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert bars[0].vwap is None
+
+
+async def test_one_bad_vwap_does_not_cost_the_rest_of_the_session() -> None:
+    """The regression: a single contradictory field used to lose every bar."""
+    feed, _ = a_feed(
+        bars=[
+            a_bar(0),
+            a_bar_with_vwap(1, average=344.576, high=344.57, low=344.43),
+            a_bar(2),
+        ]
+    )
+    bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert len(bars) == 3
+    assert [bar.vwap is None for bar in bars] == [False, True, False]
+
+
+async def test_a_dropped_vwap_is_counted_with_its_worst_excess() -> None:
+    feed, _ = a_feed(
+        bars=[
+            a_bar_with_vwap(0, average=344.576, high=344.57, low=344.43),
+            a_bar_with_vwap(1, average=344.60, high=344.57, low=344.43),
+        ]
+    )
+    await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert feed.vwap_drops() == {AAPL: VwapDrop(count=2, worst_excess=Decimal("0.03"))}
+
+
+async def test_a_vwap_inside_the_range_is_carried_through_and_counted_nowhere() -> None:
+    feed, _ = a_feed(bars=[a_bar_with_vwap(0, average=344.50, high=344.57, low=344.43)])
+    bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert bars[0].vwap == Price("344.5")
+    assert feed.vwap_drops() == {}
+
+
+async def test_a_vwap_exactly_on_a_bound_is_not_a_drop() -> None:
+    feed, _ = a_feed(bars=[a_bar_with_vwap(0, average=344.57, high=344.57, low=344.43)])
+    bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+    assert bars[0].vwap == Price("344.57")
+    assert feed.vwap_drops() == {}
 
 
 async def test_ts_init_records_when_we_received_it() -> None:

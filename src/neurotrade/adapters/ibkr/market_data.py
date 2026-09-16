@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Protocol
 
 from ib_async import Stock
@@ -118,6 +120,21 @@ class _BarData(Protocol):
     barCount: int  # trades in the bar
 
 
+@dataclass(frozen=True, slots=True)
+class VwapDrop:
+    """How often, and how badly, a symbol's VWAP failed to match its own bar.
+
+    IBKR's `average` is computed at finer precision than the tick-rounded high
+    and low it ships alongside, so it can land a fraction of a cent outside the
+    bar's range. `worst_excess` is what separates that rounding artefact from a
+    feed that is actually wrong: a few thousandths is the former, a whole cent
+    or more is worth a human.
+    """
+
+    count: int  # bars whose VWAP fell outside [low, high]
+    worst_excess: Decimal  # largest distance outside the range, in price units
+
+
 class MarketDataError(RuntimeError):
     """Raised when a request cannot be made or its answer cannot be trusted.
 
@@ -137,7 +154,7 @@ class IbkrMarketData:
         True
     """
 
-    __slots__ = ("_clock", "_connection", "_pacer", "_use_rth")
+    __slots__ = ("_clock", "_connection", "_pacer", "_use_rth", "_vwap_drops")
 
     def __init__(
         self,
@@ -161,6 +178,23 @@ class IbkrMarketData:
         self._clock = clock
         self._pacer = pacer if pacer is not None else HistoricalPacer(clock)
         self._use_rth = use_rth
+        self._vwap_drops: dict[Symbol, VwapDrop] = {}
+
+    def vwap_drops(self) -> Mapping[Symbol, VwapDrop]:
+        """Bars whose VWAP was discarded for falling outside their own range.
+
+        Never empty for free: either IBKR's rounding is showing or the feed
+        disagrees with itself, and the second case wants a human. See `_to_bar`
+        for why the bar is kept and only the VWAP is dropped.
+
+        Example:
+            >>> from neurotrade.config import IbkrSettings
+            >>> from neurotrade.core.clock import LiveClock
+            >>> feed = IbkrMarketData(IbkrConnection(IbkrSettings()), LiveClock())
+            >>> feed.vwap_drops()
+            {}
+        """
+        return dict(self._vwap_drops)
 
     @property
     def pacer(self) -> HistoricalPacer:
@@ -309,9 +343,17 @@ class IbkrMarketData:
         `Bar` is stamped at the moment it became observable, which is its close.
         Storing IBKR's timestamp unchanged would let a strategy act on a bar one
         interval before it finished forming.
+
+        A VWAP that contradicts the bar's own range is dropped here rather than
+        allowed to reject the bar — see `_checked_vwap`.
         """
         opened_at = int(entry.date.replace(tzinfo=entry.date.tzinfo or UTC).timestamp())
         close_ns = (opened_at * 1_000_000_000) + interval.nanos
+
+        high = Price.from_float(entry.high)
+        low = Price.from_float(entry.low)
+        # `average` is IBKR's VWAP for the bar; zero means it did not trade.
+        vwap = Price.from_float(entry.average) if entry.average > 0 else None
 
         return Bar(
             symbol=symbol,
@@ -319,14 +361,39 @@ class IbkrMarketData:
             ts_init=received_at,
             interval=interval,
             open=Price.from_float(entry.open),
-            high=Price.from_float(entry.high),
-            low=Price.from_float(entry.low),
+            high=high,
+            low=low,
             close=Price.from_float(entry.close),
             volume=Quantity.from_float(entry.volume),
-            # `average` is IBKR's VWAP for the bar; zero means it did not trade.
-            vwap=Price.from_float(entry.average) if entry.average > 0 else None,
+            vwap=self._checked_vwap(symbol, vwap, low=low, high=high),
             trade_count=entry.barCount if entry.barCount >= 0 else None,
         )
+
+    def _checked_vwap(
+        self, symbol: Symbol, vwap: Price | None, *, low: Price, high: Price
+    ) -> Price | None:
+        """Drop a VWAP that falls outside its own bar, and record that it did.
+
+        `Bar` rejects a VWAP outside `[low, high]`, and rightly so. IBKR ships
+        one anyway: `average` carries more decimals than the tick-rounded high
+        and low, so it can sit a few thousandths above the high. Letting that
+        raise cost a whole session of bars — 390 for JPM on 2026-09-15 — over a
+        field nothing in the corpus needs yet.
+
+        The VWAP is dropped rather than clamped to the bound: a clamped price is
+        a number no trade printed, and `vwap` is already optional. What was
+        dropped is counted in `vwap_drops` so the scale of it stays visible.
+        """
+        if vwap is None or low <= vwap <= high:
+            return vwap
+
+        excess = vwap.value - high.value if vwap > high else low.value - vwap.value
+        seen = self._vwap_drops.get(symbol)
+        self._vwap_drops[symbol] = VwapDrop(
+            count=1 if seen is None else seen.count + 1,
+            worst_excess=excess if seen is None else max(excess, seen.worst_excess),
+        )
+        return None
 
     def _duration(self, interval: BarInterval, start: Nanos, end: Nanos) -> str:
         """IBKR's duration string covering the requested range.
