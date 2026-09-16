@@ -64,6 +64,7 @@ make paper-smoke    # gate G2: submit a paper order, acknowledge, cancel
 make backfill       # fill the bar corpus from IBKR. START=YYYY-MM-DD [END= LIMIT= PASSES=]
 make seed           # seed the corpus from free vendor samples: fetch then ingest
 make seed-fetch / seed-ingest   # either half alone. SOURCE=firstrate|kibot [SNAPSHOT=]
+make daily          # fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`

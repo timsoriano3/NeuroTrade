@@ -104,6 +104,9 @@ links and the real name arrives only on the `Content-Disposition` header, so the
 to be identified by opening each link. The codes can rotate; a fetch that matches nothing must
 fail loudly rather than silently seeding an empty corpus.
 
+**FRD's sample is unadjusted** — settled 2026-09-15 against yfinance, see `13-daily-bars.doc.md`.
+For dividends only: AAPL's window holds no split.
+
 **Kibot's default files are split- and dividend-adjusted.** The `_unadjusted` variants differ —
 IBM's first open on 2026-06-15 is 272.00 unadjusted against 270.06 adjusted. Raw must stay raw:
 take the `_unadjusted` files, since adjustment is the stage 5 quality gate's job.
@@ -124,6 +127,36 @@ not the local day it felt like.
 
 **RUF043 again (fifth time): `pytest.raises(match=...)` is a regex.** `match="no manifest.json"`
 fails the build over the unescaped `.`. Use a raw string with the dot escaped.
+
+## Yahoo / yfinance
+
+**Yahoo's JSON floats overflow the corpus's Decimal column.** A $169.34 close arrives as
+`169.33999633789062`; `Price.from_float` keeps the shortest round-tripping form — fourteen
+decimal places — and `pyarrow` then refuses the write with `ArrowInvalid: Rescaling Decimal value
+would cause data loss`. Every unit test passed; the first live run died on the first symbol.
+Fix: `round(value, 4)` before `from_float` — four places is the finest tick a North American
+equity quotes in, and it recovers the price that actually traded instead of preserving float
+noise that would never compare equal to IBKR's `169.34`.
+
+**`expected_bars` floored a daily session to ZERO bars.** `duration_ns // interval.nanos` for a
+6.5-hour session and a 24-hour bar is 0, and `Coverage.is_complete(0)` is true for any count — so
+every daily cell looked filled, the plan came back empty, and a daily backfill would have fetched
+nothing while reporting success. Fixed in `TradingSession.expected_bars`: an interval at least as
+long as the session gives 1.
+
+**yfinance 1.7 deprecated `raise_errors=`.** It is `yf.config.debug.hide_exceptions = False` now,
+global to the package. Passing the old argument still works but emits a `DeprecationWarning`, and
+`filterwarnings = ["error"]` turns that into a failed test. The default (`True`) answers an empty
+frame instead of raising, which is indistinguishable from "this symbol has no data here" — a 404
+and a genuine gap would both enter the corpus as silence.
+
+**yfinance traces every request step at DEBUG** — cookie fetches, crumb lookups, the SQL of its
+own cache. The research profile runs at `DEBUG`, so a crawl buries its own progress in vendor
+tracing. The adapter raises `logging.getLogger("yfinance")` to `WARNING`.
+
+**Yahoo's daily index is tz-aware in the EXCHANGE's timezone**, stamped at local midnight —
+`America/New_York` for US lines, `America/Toronto` for `.TO`. Converting to UTC before taking
+`.date()` moves a Toronto row onto the next day.
 
 ## Logging
 

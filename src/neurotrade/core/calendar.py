@@ -118,6 +118,9 @@ class TradingSession:
         Returns:
             Whole bars fitting between open and close. A partial trailing bar
             is not counted — it would not be a complete bar of that interval.
+            An interval at least as long as the session gives **one**: a daily
+            bar summarises the session it spans, however short that session
+            was.
 
         Example:
             >>> from datetime import UTC, datetime
@@ -133,7 +136,15 @@ class TradingSession:
             390
             >>> full_day.expected_bars(BarInterval.MIN_30)
             13
+            >>> full_day.expected_bars(BarInterval.DAY_1)
+            1
         """
+        # Floor division alone answers 0 for a daily bar, because a 6.5-hour
+        # session does not contain a 24-hour one. `Coverage.is_complete` reads
+        # that as "nothing missing", so every daily cell would look filled and
+        # the crawler would fetch nothing at all (§12.1 stage 3).
+        if interval.nanos >= self.duration_ns:
+            return 1
         return self.duration_ns // interval.nanos
 
     def contains(self, ts: Nanos) -> bool:

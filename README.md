@@ -55,12 +55,14 @@ broker connection it trades through. 810 tests.
 | **Broker** | Connects to Interactive Brokers, pulls historical bars within their rate limits, and places orders — with a structural guard that refuses real ones outside the live profile |
 
 Free intraday samples from FirstRateData and Kibot are seeded with
-`make seed`, which downloads them and normalises them into the corpus through
-the same crawler the broker backfill uses.
+`make seed`, and daily bars for the whole universe — Canadian listings included
+— come from Yahoo Finance with `make daily START=YYYY-MM-DD`. Both normalise
+into the corpus through the same crawler the broker backfill uses.
 
-Still to finish in Phase 0: yfinance daily bars with universe history. The
-backfill crawler runs as `make backfill START=YYYY-MM-DD` but has not yet
-completed against a live Gateway, so the corpus holds only vendor samples.
+Still to finish in Phase 0: universe history, meaning which instruments were
+worth trading on a given past date. The backfill crawler runs as
+`make backfill START=YYYY-MM-DD` but has not yet completed against a live
+Gateway, so the corpus holds vendor samples and daily bars only.
 
 Deliberately not built yet: strategies, models, the risk engine and the
 dashboard. Those are Phases 2 onward.

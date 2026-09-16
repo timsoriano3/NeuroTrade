@@ -19,7 +19,7 @@ about adapters.
 | `calendar/` | Built. Which days each venue traded, and between which times |
 | `universe/` | Built. Which instruments are in scope, read from `config/universe.yaml` |
 | `ibkr/` | Built. Connection, historical bars, request pacing, order placement. Driven by the backfill crawler via `neurotrade ibkr backfill` |
-| `feeds/` | Built. FirstRateData and Kibot free samples — file-backed `MarketDataPort` feeds, plus the vendor downloader and snapshot read-back, driven by `neurotrade seed`. yfinance is stage 3 |
+| `feeds/` | Built. FirstRateData and Kibot free samples — file-backed `MarketDataPort` feeds, plus the vendor downloader and snapshot read-back, driven by `neurotrade seed`; and `yfinance_daily.py`, unadjusted daily bars from Yahoo, driven by `neurotrade daily backfill` |
 | `notify/` | Not built. Alerting |
 
 The empty ones are absent on purpose: a folder appears when there is real code

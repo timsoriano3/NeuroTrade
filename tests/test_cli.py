@@ -11,10 +11,11 @@ import hashlib
 import io
 import json
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pyarrow.dataset as ds
 import pytest
@@ -23,8 +24,10 @@ from typer.testing import CliRunner
 
 from neurotrade import __version__
 from neurotrade.adapters.calendar.venue_calendar import VenueCalendar
+from neurotrade.adapters.feeds import yfinance_daily
 from neurotrade.adapters.feeds.seed_sources import SeedSource
 from neurotrade.adapters.feeds.vendor_download import latest_snapshot, read_manifest
+from neurotrade.adapters.feeds.yfinance_daily import DailyRow
 from neurotrade.adapters.ibkr.connection import IbkrConnectionError
 from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.cli import _SEED_PROVENANCE, _seed_feed, _SeedJob, app
@@ -1180,3 +1183,186 @@ def test_every_seed_source_has_a_provenance_and_a_feed() -> None:
         assert vendor in _SEED_PROVENANCE
         job = _SeedJob(source=vendor, folder=Path("."), files={}, manifest=())
         assert _seed_feed(job, LiveClock()) is not None
+
+
+# ── daily backfill ────────────────────────────────────────────
+
+
+class _FakeDownloader:
+    """Stands in for `YahooDownloader` so no test reaches Yahoo."""
+
+    rows: ClassVar[tuple[DailyRow, ...]] = ()
+    calls: ClassVar[list[tuple[str, date, date]]] = []
+
+    def __call__(self, ticker: str, *, start: date, end: date) -> Sequence[DailyRow]:
+        _FakeDownloader.calls.append((ticker, start, end))
+        return _FakeDownloader.rows
+
+
+@pytest.fixture
+def fake_yahoo(monkeypatch: pytest.MonkeyPatch) -> type[_FakeDownloader]:
+    _FakeDownloader.calls = []
+    _FakeDownloader.rows = ()
+    monkeypatch.setattr(yfinance_daily, "YahooDownloader", _FakeDownloader)
+    return _FakeDownloader
+
+
+def _daily(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    args: list[str] | None = None,
+) -> tuple[int, str, str]:
+    """Run `daily backfill` over a one-symbol universe. Returns code, out, err."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL"]})
+    result = runner.invoke(
+        app,
+        [
+            "daily",
+            "backfill",
+            "--start",
+            "2024-07-01",
+            "--end",
+            "2024-07-05",
+            "--universe",
+            str(universe_path),
+            *(args or []),
+        ],
+    )
+    return result.exit_code, result.stdout, result.stderr
+
+
+_DAILY_ROWS = (
+    DailyRow(date(2024, 7, 1), 100.0, 102.0, 99.0, 101.0, 1_000.0),
+    DailyRow(date(2024, 7, 2), 101.0, 103.0, 100.0, 102.0, 1_100.0),
+)
+
+
+def test_daily_backfill_writes_one_bar_per_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    fake_yahoo.rows = _DAILY_ROWS
+
+    code, out, err = _daily(tmp_path, monkeypatch)
+
+    assert code == 0, err
+    assert out.strip() == "2"
+    counts = DuckDBCatalog(tmp_path / "derived" / "daily" / "yfinance").bar_counts(
+        Symbol("AAPL", Venue.NASDAQ), BarInterval.DAY_1
+    )
+    assert counts == {date(2024, 7, 1): 1, date(2024, 7, 2): 1}
+
+
+def test_daily_backfill_asks_yahoo_once_for_the_whole_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    """One HTTP call per symbol, not one per session — the crawler offers three
+    sessions here and Yahoo must still be asked exactly once."""
+    fake_yahoo.rows = _DAILY_ROWS
+
+    code, _, err = _daily(tmp_path, monkeypatch)
+
+    assert code == 0, err
+    assert fake_yahoo.calls == [("AAPL", date(2024, 7, 1), date(2024, 7, 5))]
+
+
+def test_daily_backfill_keeps_daily_bars_out_of_the_minute_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    """A daily bar under `raw/bars/` would mark that session held for the
+    minute backfill and hide a real gap."""
+    fake_yahoo.rows = _DAILY_ROWS
+
+    code, _, err = _daily(tmp_path, monkeypatch)
+
+    assert code == 0, err
+    assert not (tmp_path / "raw" / "bars").exists()
+    assert not (tmp_path / "derived" / "seed").exists()
+
+
+def test_daily_backfill_stamps_yfinance_as_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    fake_yahoo.rows = _DAILY_ROWS
+
+    code, _, err = _daily(tmp_path, monkeypatch)
+
+    assert code == 0, err
+    coverage = DuckDBCatalog(tmp_path / "derived" / "daily" / "yfinance").coverage(
+        Symbol("AAPL", Venue.NASDAQ), BarInterval.DAY_1
+    )
+    assert {held.sources for held in coverage} == {("yfinance",)}
+
+
+def test_daily_backfill_run_twice_writes_nothing_the_second_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    """A daily session holds exactly one bar, so `expected_bars` must answer 1
+    rather than flooring a 6.5-hour session to zero daily bars."""
+    fake_yahoo.rows = _DAILY_ROWS
+
+    first_code, _, _ = _daily(tmp_path, monkeypatch)
+    second_code, out, err = _daily(tmp_path, monkeypatch)
+
+    assert (first_code, second_code) == (0, 0), err
+    assert out.strip() == "0"
+
+
+def test_daily_backfill_reports_a_row_the_calendar_denies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    fake_yahoo.rows = (
+        *_DAILY_ROWS,
+        DailyRow(date(2024, 7, 4), 100.0, 102.0, 99.0, 101.0, 1_000.0),  # Independence Day
+    )
+
+    code, _, err = _daily(tmp_path, monkeypatch)
+
+    assert code == 0, err
+    assert "unmatched AAPL.NASDAQ 2024-07-04" in err
+
+
+def test_daily_backfill_rejects_an_inverted_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL"]})
+
+    result = runner.invoke(
+        app,
+        [
+            "daily",
+            "backfill",
+            "--start",
+            "2024-07-05",
+            "--end",
+            "2024-07-01",
+            "--universe",
+            str(universe_path),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "is before" in result.stderr
+
+
+def test_daily_backfill_rejects_a_missing_universe_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_yahoo: type[_FakeDownloader]
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+
+    result = runner.invoke(
+        app,
+        [
+            "daily",
+            "backfill",
+            "--start",
+            "2024-07-01",
+            "--universe",
+            str(tmp_path / "absent.yaml"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "not found" in result.stderr

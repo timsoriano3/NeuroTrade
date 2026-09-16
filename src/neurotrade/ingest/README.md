@@ -14,17 +14,18 @@ from live market data. This package is that plan.
 
 Wired to real adapters — Parquet store, DuckDB catalog, venue calendar,
 universe file, and a feed — in `cli.py`, which is the only place those
-concretes meet this package. **Two commands drive the same crawl**, differing
-only in which feed and which dataset root they hand it:
+concretes meet this package. **Three commands drive the same crawl**, differing
+only in which feed, which interval and which dataset root they hand it:
 
 ```bash
-make backfill START=2026-08-01             # IBKR history -> raw/bars
+make backfill START=2026-08-01             # IBKR history -> raw/bars, 1m
 make backfill START=2026-08-01 LIMIT=50 PASSES=3
-make seed                                  # vendor samples -> derived/seed/<source>
+make seed                                  # vendor samples -> derived/seed/<source>, 1m
+make daily START=2021-09-15                # Yahoo -> derived/daily/yfinance, 1d
 ```
 
-That the seed feeds reuse this crawler rather than parsing into the corpus
-themselves is the point: one calendar trim, one resumability rule, one outcome
+That the seed and Yahoo feeds reuse this crawler rather than parsing into the
+corpus themselves is the point: one calendar trim, one resumability rule, one outcome
 report, whatever the data's origin (§3.6).
 
 ## Why it depends on core alone

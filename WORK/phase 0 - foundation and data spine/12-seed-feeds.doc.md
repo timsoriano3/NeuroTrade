@@ -55,9 +55,11 @@ writes nothing. A second *fetch* on the same UTC day fails on purpose (raw is im
 
 ## Not done
 
-- **FRD's adjustment basis is still unverified** — `manifest.json` records `unknown`. The yfinance
-  check the plan wanted cannot run yet: yfinance is not installed (§12.1 stage 3). The datum to
-  compare against is recorded below.
+- ~~FRD's adjustment basis is unverified~~ — **settled 2026-09-15: the sample is unadjusted.**
+  AAPL 2023-09-29 matches yfinance's unadjusted open and high exactly (172.02 / 173.07) and sits
+  ~1.8% above its adjusted close of 168.93. Dividends only — AAPL's window holds no split.
+  `manifest.json` still records `unknown`, which is what was known when those bytes were fetched.
+  Working in `13-daily-bars.doc.md`.
 - **The Kibot-vs-IBKR overlap check is blocked** on a successful weekday IBKR crawl; `raw/bars/`
   is still empty.
 - Splits, dividends, gap and halt marking are stage 5 (Phase 1).
@@ -88,7 +90,8 @@ Per-symbol, checked against `VenueCalendar.expected_bars`:
 **No session anywhere holds more than its expected bars**, which is what proves the extended-hours
 trim (FRD carries 04:00–20:00 ET) and the half-day closes came out right.
 
-AAPL's last FRD session, 2023-09-29: 390 bars, first open `172.02`, last close `171.22` — the
-numbers a stage-3 yfinance check will compare to settle the adjustment question.
+AAPL's last FRD session, 2023-09-29: 390 bars, first open `172.02`, last close `171.22`. Those
+are the numbers the stage-3 yfinance check compared against, which is how the sample is now known
+to be unadjusted.
 
 Traps found building it are in `08-gotchas.doc.md`.

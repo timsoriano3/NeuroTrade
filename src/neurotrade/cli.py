@@ -44,6 +44,7 @@ from neurotrade.adapters.feeds.vendor_download import (
     latest_snapshot,
     read_manifest,
 )
+from neurotrade.adapters.feeds.yfinance_daily import YFinanceDailyFeed
 from neurotrade.adapters.ibkr.broker import IbkrBroker
 from neurotrade.adapters.ibkr.connection import IbkrConnection, IbkrConnectionError
 from neurotrade.adapters.ibkr.market_data import IbkrMarketData
@@ -124,6 +125,9 @@ app.add_typer(ibkr_app, name="ibkr")
 
 seed_app = typer.Typer(help="Seed the corpus from free vendor sample files.", no_args_is_help=True)
 app.add_typer(seed_app, name="seed")
+
+daily_app = typer.Typer(help="Daily bars from Yahoo Finance.", no_args_is_help=True)
+app.add_typer(daily_app, name="daily")
 
 
 @app.callback()
@@ -870,6 +874,135 @@ def _log_seed_ingest(job: _SeedJob, report: CrawlReport, span: tuple[date, date]
         universe_digest=Universe(job.files.keys()).digest,
         start=str(span[0]),
         end=str(span[1]),
+        planned=report.planned,
+        requests=report.requests,
+        bars_written=report.bars_written,
+        filled=report.count(CellStatus.FILLED),
+        empty=report.count(CellStatus.EMPTY),
+        failed=report.count(CellStatus.FAILED),
+        skipped=report.count(CellStatus.SKIPPED),
+        stopped=report.stopped,
+    )
+
+
+@daily_app.command("backfill")
+def daily_backfill(
+    ctx: typer.Context,
+    start: Annotated[
+        datetime,
+        typer.Option("--start", help="First session to fill, as YYYY-MM-DD.", formats=["%Y-%m-%d"]),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end",
+            help="Last session to fill, as YYYY-MM-DD. Defaults to yesterday, UTC.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the symbols to fill.")
+    ] = _DEFAULT_UNIVERSE,
+    limit: Annotated[
+        int | None, typer.Option("--limit", min=1, help="Most instrument-sessions to offer.")
+    ] = None,
+) -> None:
+    """Fill the daily-bar corpus from Yahoo Finance (§12.1 stage 3).
+
+    Runs the **same crawler** the IBKR backfill and the seed ingest run, at
+    `1d` instead of `1m`, so the calendar trim, the resumability and the
+    outcome report are shared rather than reimplemented (§3.6). Yahoo is asked
+    once per symbol for the whole range; the crawler's per-session cells are
+    served from that one download.
+
+    Bars land under `<derived_dir>/daily/yfinance/`, never beside the minute
+    bars: the catalog counts bars without looking at provenance, so a daily bar
+    in the IBKR root would mark that session as held and hide a genuine gap.
+
+    Prices are **unadjusted** — what traded on the day. Split and dividend
+    adjustment is §12.1 stage 5, computed from corporate actions rather than
+    baked into the corpus.
+
+    Canadian listings come through the same command: Yahoo knows the TSX lines
+    by their `.TO` suffix, which `yahoo_ticker` adds from the venue.
+
+    Re-running is safe: the crawler plans from what the corpus already holds,
+    so a second run over the same range writes nothing.
+
+    Exits 2 on a bad universe file or an inverted range, 1 if Yahoo will not
+    answer or the pass gives up.
+
+    Example:
+        $ neurotrade daily backfill --start 2021-01-04
+        $ neurotrade daily backfill --start 2024-01-02 --end 2024-06-28 --limit 200
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+
+    first = start.date()
+    # UTC yesterday is never later than venue-local yesterday, so the default
+    # cannot reach a session that is still trading anywhere in the universe and
+    # store a daily bar that is not final yet.
+    last = end.date() if end is not None else to_datetime(clock.now_ns()).date() - timedelta(days=1)
+    if last < first:
+        typer.echo(f"--end {last} is before --start {first}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    daily_root = settings.storage.derived_dir / "daily" / Source.YFINANCE.value
+    calendar = VenueCalendar()
+    feed = YFinanceDailyFeed(calendar, clock, start=first, end=last)
+
+    async def run() -> CrawlReport:
+        return await crawl(
+            universe,
+            calendar,
+            DuckDBCatalog(daily_root),
+            feed,
+            ParquetStore(daily_root, clock),
+            start=first,
+            end=last,
+            source=Source.YFINANCE.value,
+            interval=BarInterval.DAY_1,
+            limit=limit,
+            on_outcome=_echo_cell,
+        )
+
+    try:
+        report = asyncio.run(run())
+    except FeedError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+    _log_daily_backfill(report, universe, first, last)
+    for symbol, dates in sorted(feed.unmatched().items()):
+        # Yahoo had a row on a day our calendar says the venue was shut. One of
+        # the two is wrong and neither is safe to assume.
+        typer.echo(f"unmatched {symbol} {', '.join(str(day) for day in dates)}", err=True)
+    typer.echo(f"corpus    {daily_root}", err=True)
+    if not report.completed:
+        typer.echo(f"stopped   {report.stopped}", err=True)
+    typer.echo(report.bars_written)
+    if not report.completed:
+        raise typer.Exit(code=1)
+
+
+def _log_daily_backfill(report: CrawlReport, universe: Universe, first: date, last: date) -> None:
+    """Record one daily crawl, with the universe it covered."""
+    log.info(
+        "daily_backfill_complete",
+        source=Source.YFINANCE.value,
+        adjusted="unadjusted",  # what the corpus holds, for a later adjustment pass
+        universe_digest=universe.digest,
+        symbols=len(universe),
+        start=str(first),
+        end=str(last),
         planned=report.planned,
         requests=report.requests,
         bars_written=report.bars_written,

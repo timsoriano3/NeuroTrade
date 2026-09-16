@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest docs-check \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest daily docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -129,6 +129,16 @@ seed-fetch: ## Download the vendor samples into a dated raw snapshot. [SOURCE=fi
 seed-ingest: ## Normalise a fetched snapshot into derived/seed. [SOURCE= SNAPSHOT=YYYY-MM-DD]
 	$(PY) neurotrade --profile $(PROFILE) seed ingest $(if $(SOURCE),--source $(SOURCE)) \
 	  $(if $(SNAPSHOT),--snapshot $(SNAPSHOT))
+
+# Daily bars from Yahoo Finance (§12.1 stage 3), including the `.TO` Canadian
+# lines IBKR's crawler is slowest to reach. Unadjusted, and written to
+# derived/daily/yfinance so they can never be mistaken for the minute corpus.
+# START is required for the same reason `backfill` requires it: a default would
+# silently decide how much history the corpus holds.
+daily: ## Fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
+	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
+	$(PY) neurotrade --profile $(PROFILE) daily backfill --start $(START) \
+	  $(if $(END),--end $(END)) $(if $(LIMIT),--limit $(LIMIT))
 
 replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
 	@if [ -n "$(SESSION)" ]; then \

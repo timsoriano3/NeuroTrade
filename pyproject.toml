@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0.3",             # profile files
     "structlog>=26.1.0",
     "typer>=0.27.1",
+    "yfinance>=1.7.0",           # daily bars and universe history (§12.1 stage 3)
 ]
 
 [project.scripts]
@@ -87,7 +88,7 @@ warn_unreachable = true
 # Neither ships a py.typed marker either. pandas appears only as the type of the
 # timestamps exchange_calendars hands back; nothing in this codebase computes
 # with it.
-module = ["exchange_calendars.*", "pandas.*"]
+module = ["exchange_calendars.*", "pandas.*", "yfinance.*"]
 ignore_missing_imports = true
 
 # ── Tests ────────────────────────────────────────────────────

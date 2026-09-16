@@ -53,9 +53,14 @@ Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is 
   `10-backfill-crawler.doc.md`. What is left is a weekday crawl with the farms up.
 - ~~**Free sample seed data** (§12.1 stage 2)~~ — **done.** `make seed` fetches both vendors and
   ingests them through the same crawler; 1,019,421 bars are in `derived/seed/` as of 2026-09-15.
-  FRD's adjustment basis is still `unknown` (needs stage 3's yfinance) and the Kibot-vs-IBKR
-  overlap check waits on a weekday IBKR crawl. See `12-seed-feeds.doc.md`.
-- **yfinance daily bars and universe history** (§12.1 stage 3) — including `.TO` tickers.
+  FRD's sample is now known to be **unadjusted** (checked against yfinance, 2026-09-15); the
+  Kibot-vs-IBKR overlap check still waits on a weekday IBKR crawl. See `12-seed-feeds.doc.md`.
+- **yfinance daily bars** (§12.1 stage 3, first half) — **done.** `make daily` crawls Yahoo
+  through the same crawler at `1d`; 53,879 unadjusted bars over 43 instruments, 2021-09-15 →
+  2026-09-11, in `derived/daily/yfinance/`, `.TO` lines included. See `13-daily-bars.doc.md`.
+- **Universe history** (§12.1 stage 3, second half) — not started. The daily corpus it would be
+  built from now exists; yfinance lists only surviving names, so any membership history from it
+  is survivorship-biased and has to say so.
 
 Corpus target before Phase 5: 3–5 years of 1-minute bars across US + TSX, ~2,000 symbols,
 well under 100 GB compressed.
