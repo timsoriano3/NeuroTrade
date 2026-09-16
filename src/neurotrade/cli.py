@@ -53,10 +53,12 @@ from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.adapters.storage.parquet_store import ParquetStore
 from neurotrade.adapters.storage.schemas import Source
 from neurotrade.adapters.universe.universe_file import InvalidUniverseFile, UniverseFile
+from neurotrade.adapters.universe.universe_history_parquet import UniverseHistoryStore
 from neurotrade.config import (
     DEFAULT_CONFIG_DIR,
     Profile,
     Settings,
+    UniverseScreenSettings,
     config_hash,
     describe,
     load_settings,
@@ -65,9 +67,10 @@ from neurotrade.core.clock import LiveClock, SimClock, to_datetime
 from neurotrade.core.events import BarInterval
 from neurotrade.core.ids import IntentId, OrderId, RunId
 from neurotrade.core.orders import Fill, Order, OrderType
-from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
-from neurotrade.core.universe import Universe
+from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol, Venue
+from neurotrade.core.universe import Universe, UniverseHistory
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
+from neurotrade.ingest.universe_history import LiquidityFloor, ScreenRules, screen_universe
 from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
 
@@ -128,6 +131,9 @@ app.add_typer(seed_app, name="seed")
 
 daily_app = typer.Typer(help="Daily bars from Yahoo Finance.", no_args_is_help=True)
 app.add_typer(daily_app, name="daily")
+
+universe_app = typer.Typer(help="Point-in-time universe membership.", no_args_is_help=True)
+app.add_typer(universe_app, name="universe")
 
 
 @app.callback()
@@ -1018,6 +1024,152 @@ def _log_daily_backfill(report: CrawlReport, universe: Universe, first: date, la
         failed=report.count(CellStatus.FAILED),
         skipped=report.count(CellStatus.SKIPPED),
         stopped=report.stopped,
+    )
+
+
+@universe_app.command("build")
+def universe_build(
+    ctx: typer.Context,
+    start: Annotated[
+        datetime,
+        typer.Option(
+            "--start", help="First session to decide membership for.", formats=["%Y-%m-%d"]
+        ),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end",
+            help="Last session to decide membership for. Defaults to yesterday, UTC.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the candidates.")
+    ] = _DEFAULT_UNIVERSE,
+) -> None:
+    """Build point-in-time universe membership from the daily corpus (§12.1 stage 3).
+
+    For every session in range it records which instruments were eligible,
+    judged only on sessions **before** that one. A backtest at date `t` can then
+    ask what the universe was at `t` instead of being handed today's answer,
+    which is the difference between a result and a survivorship artefact.
+
+    The screen is a liquidity floor: median traded value over the trailing
+    window, plus a minimum close, both per currency (`universe_screen` in the
+    profile). US and Canadian names are never compared against one threshold —
+    that would need a rate this layer does not have.
+
+    Reads `<derived_dir>/daily/yfinance/` and writes one file to
+    `<derived_dir>/universe/yfinance/history.parquet`, stamped with the config
+    hash and the candidate universe's digest.
+
+    **The result is survivorship-biased and says so.** Yahoo lists names that
+    still trade, so anything delisted inside the range is absent from the
+    corpus entirely — no screen can recover it. The flag travels in the
+    artifact so §17's audits can see it.
+
+    Exits 2 on a bad universe file or an inverted range, 1 if the corpus and
+    the calendar disagree about when a venue traded.
+
+    Example:
+        $ neurotrade universe build --start 2022-01-03
+        $ neurotrade universe build --start 2024-01-02 --end 2024-06-28
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+
+    first = start.date()
+    last = end.date() if end is not None else to_datetime(clock.now_ns()).date() - timedelta(days=1)
+    if last < first:
+        typer.echo(f"--end {last} is before --start {first}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    try:
+        rules = _screen_rules(settings.universe_screen)
+    except (ValueError, KeyError) as error:
+        typer.echo(f"universe_screen: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
+    daily_root = settings.storage.derived_dir / "daily" / Source.YFINANCE.value
+    try:
+        history = screen_universe(
+            universe,
+            VenueCalendar(),
+            ParquetStore(daily_root, clock),
+            start=first,
+            end=last,
+            rules=rules,
+            # Yahoo only lists what still trades; see the command docstring.
+            survivorship_biased=True,
+        )
+    except ValueError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+    out = UniverseHistoryStore(settings.storage.derived_dir / "universe" / Source.YFINANCE.value)
+    path = out.write(
+        history,
+        universe_digest=universe.digest,
+        config_hash=config_hash(settings),
+        clock=clock,
+    )
+    _log_universe_build(history, universe, first, last)
+
+    sizes = [len(row) for row in history]
+    typer.echo(f"sessions  {len(history)}, {first} to {last}", err=True)
+    typer.echo(
+        f"members   {min(sizes) if sizes else 0}-{max(sizes) if sizes else 0} of {len(universe)}",
+        err=True,
+    )
+    typer.echo("bias      survivorship-biased (yfinance lists survivors only)", err=True)
+    typer.echo(f"digest    {history.digest}", err=True)
+    typer.echo(f"artifact  {path}", err=True)
+    typer.echo(len(history))
+
+
+def _screen_rules(configured: UniverseScreenSettings) -> ScreenRules:
+    """Turn configured thresholds into value objects.
+
+    The conversion is where a floor stops being two numbers and becomes money
+    in a currency, which is what makes the cross-currency comparison in the
+    screen impossible to get wrong.
+    """
+    return ScreenRules(
+        lookback_sessions=configured.lookback_sessions,
+        floors=tuple(
+            LiquidityFloor(
+                Money(floor.min_median_dollar_volume, Currency(code)),
+                Price(floor.min_close),
+            )
+            for code, floor in sorted(configured.floors.items())
+        ),
+    )
+
+
+def _log_universe_build(
+    history: UniverseHistory, universe: Universe, first: date, last: date
+) -> None:
+    """Record one screen run, with what it was a subset of."""
+    sizes = [len(row) for row in history]
+    log.info(
+        "universe_history_built",
+        sessions=len(history),
+        start=str(first),
+        end=str(last),
+        candidates=len(universe),
+        smallest=min(sizes) if sizes else 0,
+        largest=max(sizes) if sizes else 0,
+        survivorship_biased=history.survivorship_biased,
+        history_digest=history.digest,
+        universe_digest=universe.digest,
     )
 
 

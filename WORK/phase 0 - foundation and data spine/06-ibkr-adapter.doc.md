@@ -46,6 +46,12 @@ Historical bars → `Bar` events.
   injected `Clock` shows elapsed time `>= timeout`. Both paths name the instrument and the
   timeout in the error.
 
+### Reconciling a bar the feed disagrees with
+
+`_checked_vwap` drops a VWAP that falls outside its own bar's `[low, high]` and records it in
+`vwap_drops()` — per symbol, with the worst excess seen. The bar survives; only the field is lost.
+See `08-gotchas.doc.md` for the live case that forced this and why dropping beats clamping.
+
 ## `pacing.py`
 
 IBKR throttles historical data: roughly 60 requests per 10 minutes, and exceeding it earns a

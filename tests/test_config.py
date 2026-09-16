@@ -276,7 +276,7 @@ def test_environmental_change_does_not_change_the_hash(
 
 def test_environmental_fields_are_excluded_from_the_hashed_payload() -> None:
     included = set(behavioural_values(load_settings(Profile.RESEARCH)))
-    assert included == {"profile", "allow_live_orders"}
+    assert included == {"profile", "allow_live_orders", "universe_screen"}
 
 
 def test_new_fields_are_hashed_unless_they_opt_out() -> None:

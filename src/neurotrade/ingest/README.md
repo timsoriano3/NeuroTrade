@@ -11,6 +11,7 @@ from live market data. This package is that plan.
 |---|---|
 | `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work |
 | `crawler.py` | `crawl` — one pass: plan, fetch each missing session from the feed, write it to the store. `CrawlReport` says what the pass did |
+| `universe_history.py` | `screen_universe` — who was tradable on each past session, from the daily corpus. `ScreenRules` and `LiquidityFloor` are the thresholds |
 
 Wired to real adapters — Parquet store, DuckDB catalog, venue calendar,
 universe file, and a feed — in `cli.py`, which is the only place those
@@ -23,6 +24,13 @@ make backfill START=2026-08-01 LIMIT=50 PASSES=3
 make seed                                  # vendor samples -> derived/seed/<source>, 1m
 make daily START=2021-09-15                # Yahoo -> derived/daily/yfinance, 1d
 ```
+
+`universe_history.py` is the exception: it consumes the corpus rather than
+filling it. `make universe START=2022-01-03` reads `derived/daily/yfinance` and
+writes point-in-time membership to `derived/universe/yfinance`. Its one rule
+worth restating here is that the trailing window ends at **t-1** — a bar is
+stamped at its session close, so the session being decided cannot vote on
+itself without leaking the future into the decision.
 
 That the seed and Yahoo feeds reuse this crawler rather than parsing into the
 corpus themselves is the point: one calendar trim, one resumability rule, one outcome

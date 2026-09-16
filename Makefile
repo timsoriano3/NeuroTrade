@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest daily docs-check \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest daily universe docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -139,6 +139,15 @@ daily: ## Fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
 	$(PY) neurotrade --profile $(PROFILE) daily backfill --start $(START) \
 	  $(if $(END),--end $(END)) $(if $(LIMIT),--limit $(LIMIT))
+
+# Point-in-time membership over the daily corpus (§12.1 stage 3, second half).
+# Reads derived/daily/yfinance and writes one file to derived/universe/yfinance.
+# START is the first session to DECIDE, not the first session read: the screen
+# reaches further back on its own for the trailing window.
+universe: ## Build point-in-time universe membership. START=YYYY-MM-DD [END=]
+	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
+	$(PY) neurotrade --profile $(PROFILE) universe build --start $(START) \
+	  $(if $(END),--end $(END))
 
 replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
 	@if [ -n "$(SESSION)" ]; then \

@@ -14,3 +14,26 @@ log_level: INFO
 
 # Never enabled here. Only the live profile turns this on, and only ever there.
 allow_live_orders: false
+
+# The point-in-time liquidity screen behind universe history (§12.1 stage 3).
+# Hashed, unlike storage or ibkr: moving a floor changes which instruments a
+# strategy was allowed to see, and a trade record has to show which floor it ran
+# under.
+#
+# Amounts are QUOTED so they parse as decimals. Unquoted, YAML hands 5.0 over as
+# a float, and a binary artefact has no place in a threshold that decides
+# membership.
+#
+# Two currencies rather than one converted threshold: converting needs a
+# point-in-time FX rate this layer does not have, and Money refuses to compare
+# across currencies anyway. The Canadian floor is lower because the TSX is a
+# smaller market — the US figure would screen out most of it.
+universe_screen:
+  lookback_sessions: 20  # about a trading month, all strictly before the session decided
+  floors:
+    USD:
+      min_median_dollar_volume: "20000000"
+      min_close: "5"
+    CAD:
+      min_median_dollar_volume: "5000000"
+      min_close: "5"

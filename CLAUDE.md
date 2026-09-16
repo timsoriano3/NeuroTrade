@@ -65,6 +65,7 @@ make backfill       # fill the bar corpus from IBKR. START=YYYY-MM-DD [END= LIMI
 make seed           # seed the corpus from free vendor samples: fetch then ingest
 make seed-fetch / seed-ingest   # either half alone. SOURCE=firstrate|kibot [SNAPSHOT=]
 make daily          # fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
+make universe       # build point-in-time universe membership. START=YYYY-MM-DD [END=]
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`

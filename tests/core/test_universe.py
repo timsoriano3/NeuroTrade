@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import date
 
 import pytest
 
 from neurotrade.core.types import Symbol, Venue
-from neurotrade.core.universe import Universe
+from neurotrade.core.universe import Universe, UniverseHistory, UniverseMembership
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
 MSFT = Symbol("MSFT", Venue.NASDAQ)
@@ -108,7 +109,7 @@ def test_digest_is_stable_across_processes_and_hash_seeds() -> None:
     invisibly from inside a single process.
     """
     script = (
-        "from neurotrade.core.universe import Universe;"
+        "from neurotrade.core.universe import Universe, UniverseHistory, UniverseMembership;"
         "from neurotrade.core.types import Symbol, Venue;"
         "print(Universe([Symbol('MSFT', Venue.NASDAQ), Symbol('AAPL', Venue.NASDAQ),"
         " Symbol('TD', Venue.TSX)]).digest)"
@@ -156,3 +157,82 @@ def test_contains_a_non_symbol_object_returns_false() -> None:
 def test_repr_shape() -> None:
     universe = Universe([TD_NYSE, TD_TSX])
     assert repr(universe) == f"Universe(2 symbols, NYSE+TSX, digest={universe.digest})"
+
+
+# ── UniverseMembership ───────────────────────────────────────
+
+AAPL = Symbol("AAPL", Venue.NASDAQ)
+MSFT = Symbol("MSFT", Venue.NASDAQ)
+JULY_1 = date(2024, 7, 1)
+JULY_2 = date(2024, 7, 2)
+
+
+def test_a_membership_sorts_and_deduplicates_like_a_universe() -> None:
+    membership = UniverseMembership(JULY_1, [MSFT, AAPL, AAPL])
+    assert membership.symbols == (AAPL, MSFT)
+
+
+def test_a_membership_may_be_empty() -> None:
+    """Unlike `Universe`. A screen that admitted nobody is a real answer, and
+    the row is the evidence the date was looked at."""
+    assert len(UniverseMembership(JULY_1, [])) == 0
+
+
+# ── UniverseHistory ──────────────────────────────────────────
+
+
+def test_rows_are_ordered_by_date_however_they_arrive() -> None:
+    history = UniverseHistory(
+        [UniverseMembership(JULY_2, [MSFT]), UniverseMembership(JULY_1, [AAPL])],
+        survivorship_biased=False,
+    )
+    assert history.dates == (JULY_1, JULY_2)
+
+
+def test_two_rows_on_one_date_are_refused() -> None:
+    """Which membership governs that session is not something to guess at."""
+    with pytest.raises(ValueError, match="same session date"):
+        UniverseHistory(
+            [UniverseMembership(JULY_1, [AAPL]), UniverseMembership(JULY_1, [MSFT])],
+            survivorship_biased=False,
+        )
+
+
+def test_membership_is_carried_forward_to_a_later_date() -> None:
+    history = UniverseHistory([UniverseMembership(JULY_1, [AAPL])], survivorship_biased=False)
+    assert history.as_of(date(2024, 12, 25)) == (AAPL,)
+
+
+def test_asking_before_the_history_starts_raises() -> None:
+    """Answering "nobody" would read as a screen that rejected everyone, and a
+    backtest would quietly trade nothing instead of failing."""
+    history = UniverseHistory([UniverseMembership(JULY_1, [AAPL])], survivorship_biased=False)
+    with pytest.raises(LookupError, match="history starts 2024-07-01"):
+        history.as_of(date(2024, 6, 30))
+
+
+def test_the_bias_flag_changes_the_digest() -> None:
+    """Two histories with identical membership are not the same artifact if one
+    of them could only see survivors."""
+    rows = [UniverseMembership(JULY_1, [AAPL])]
+    assert (
+        UniverseHistory(rows, survivorship_biased=True).digest
+        != UniverseHistory(rows, survivorship_biased=False).digest
+    )
+
+
+def test_the_digest_is_stable_across_row_order() -> None:
+    forwards = UniverseHistory(
+        [UniverseMembership(JULY_1, [AAPL]), UniverseMembership(JULY_2, [MSFT])],
+        survivorship_biased=False,
+    )
+    backwards = UniverseHistory(
+        [UniverseMembership(JULY_2, [MSFT]), UniverseMembership(JULY_1, [AAPL])],
+        survivorship_biased=False,
+    )
+    assert forwards.digest == backwards.digest
+
+
+def test_repr_names_the_span_and_the_bias() -> None:
+    history = UniverseHistory([UniverseMembership(JULY_1, [AAPL])], survivorship_biased=True)
+    assert "survivorship-biased" in repr(history)

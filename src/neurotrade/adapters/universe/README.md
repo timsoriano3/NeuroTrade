@@ -11,6 +11,20 @@ ranked overnight by the Universe Selector.
 | File | What it does |
 |---|---|
 | `universe_file.py` | `UniverseFile` — reads and validates `config/universe.yaml` into a `Universe` |
+| `universe_history_parquet.py` | `UniverseHistoryStore` — reads and writes the point-in-time membership artifact |
+
+## The history artifact
+
+`universe_history_parquet.py` persists what `ingest/universe_history.py` computes:
+one Parquet file per source under `derived/universe/`, holding which instruments
+were eligible on each session date.
+
+Two details are load-bearing. A session on which the screen admitted **nobody**
+still gets a row, with a null ticker — drop it and an empty session becomes
+indistinguishable from one never evaluated, and `as_of` would carry the previous
+membership across it. And the digest recorded at write time is **recomputed on
+read**: a truncated or hand-edited artifact would quietly change which names a
+backtest was allowed to trade, and nothing downstream would notice.
 
 ## Why a file, for now
 

@@ -32,6 +32,7 @@ from neurotrade.adapters.feeds.yfinance_daily import DailyRow
 from neurotrade.adapters.ibkr.connection import IbkrConnectionError
 from neurotrade.adapters.ibkr.market_data import VwapDrop
 from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
+from neurotrade.adapters.storage.parquet_store import ParquetStore
 from neurotrade.cli import _SEED_PROVENANCE, _seed_feed, _SeedJob, app
 from neurotrade.config import Profile, config_hash, load_settings
 from neurotrade.core.clock import LiveClock, SimClock, to_nanos
@@ -395,6 +396,133 @@ def _patch_ibkr(
 
     monkeypatch.setattr("neurotrade.cli.IbkrConnection", FakeConnection)
     monkeypatch.setattr("neurotrade.cli.IbkrMarketData", FakeMarketData)
+
+
+# ── universe build ────────────────────────────────────────────
+
+
+def _seed_daily(tmp_path: Path, symbol: Symbol, days: Sequence[date], *, close: str) -> None:
+    """Daily bars in the corpus the screen reads, stamped at each session close."""
+    root = tmp_path / "derived" / "daily" / "yfinance"
+    store = ParquetStore(root, SimClock(0))
+    for day in days:
+        session = VenueCalendar().session(symbol.venue, day)
+        assert session is not None
+        price = Price(close)
+        store.write_bars(
+            [
+                Bar(
+                    symbol=symbol,
+                    ts_event=session.close_ns,
+                    ts_init=session.close_ns,
+                    interval=BarInterval.DAY_1,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=Quantity("1000000"),
+                )
+            ],
+            source="yfinance",
+            session_date=day,
+        )
+
+
+def test_universe_build_writes_an_artifact_and_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    # Two sessions of window rather than the configured twenty, so the fixture
+    # stays small; the screen is the same either way.
+    monkeypatch.setenv("NEUROTRADE_UNIVERSE_SCREEN__LOOKBACK_SESSIONS", "2")
+    universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL"]})
+    symbol = Symbol("AAPL", Venue.NASDAQ)
+    sessions = VenueCalendar().sessions(Venue.NASDAQ, date(2024, 6, 3), date(2024, 6, 7))
+    _seed_daily(tmp_path, symbol, sessions, close="100")
+
+    result = runner.invoke(
+        app,
+        [
+            "universe",
+            "build",
+            "--start",
+            "2024-06-06",
+            "--end",
+            "2024-06-07",
+            "--universe",
+            str(universe_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "derived" / "universe" / "yfinance" / "history.parquet").exists()
+    assert "sessions  2, 2024-06-06 to 2024-06-07" in result.stderr
+    assert "members   1-1 of 1" in result.stderr
+    # The bias is printed, not buried: the artifact is only as good as its source.
+    assert "survivorship-biased" in result.stderr
+
+
+def test_universe_build_admits_nobody_from_an_empty_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corpus not yet filled is an ordinary state, not a crash."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("NEUROTRADE_UNIVERSE_SCREEN__LOOKBACK_SESSIONS", "2")
+    universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL"]})
+
+    result = runner.invoke(
+        app,
+        [
+            "universe",
+            "build",
+            "--start",
+            "2024-06-06",
+            "--end",
+            "2024-06-07",
+            "--universe",
+            str(universe_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "members   0-0 of 1" in result.stderr
+
+
+def test_universe_build_refuses_an_inverted_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL"]})
+
+    result = runner.invoke(
+        app,
+        [
+            "universe",
+            "build",
+            "--start",
+            "2024-06-07",
+            "--end",
+            "2024-06-03",
+            "--universe",
+            str(universe_path),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "is before --start" in result.stderr
+
+
+def test_universe_build_refuses_a_missing_universe_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+
+    result = runner.invoke(
+        app,
+        ["universe", "build", "--start", "2024-06-06", "--universe", str(tmp_path / "nope.yaml")],
+    )
+
+    assert result.exit_code == 2
 
 
 # ── backfill: argument validation ─────────────────────────────

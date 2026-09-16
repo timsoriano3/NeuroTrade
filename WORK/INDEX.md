@@ -15,13 +15,11 @@ Phase 0 exit gates, both verified:
 - **G1** — a session replays bit-for-bit. `make verify-replay` → `4f58fe2c99cd26dc7cbb8faf033a39d1`
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
-Phase 0 work still open (§12.1): the first successful live **IBKR** backfill crawl, and the
-**universe-history** half of stage 3. Seed data is done — **1,019,421 vendor-sample bars** in
-`derived/seed/` (`12-seed-feeds.doc.md`) — and so are yfinance daily bars: **53,879 bars over 43
-instruments, 2021-09-15 → 2026-09-11**, in `derived/daily/yfinance/` (`13-daily-bars.doc.md`).
-The IBKR side exists end to end but every live attempt has hit a weekend data-farm outage, so
-`raw/bars/` is still empty; see `10-backfill-crawler.doc.md` and `08-gotchas.doc.md`. The corpus
-quality gate is **Phase 1**, not Phase 0.
+**§12.1 stages 1–3 all delivered** (2026-09-15). What Phase 0 still owes is corpus *depth* —
+crawl time, not code. Corpus now: IBKR minute bars 47,580 over 41 names (`raw/bars/`, the weekday
+crawl works; 55 requests per 10 min means weeks to target); seed samples 1,019,421
+(`derived/seed/`); daily bars 53,879 over 43 names, 2021-09-15 → 2026-09-11; universe history
+1,202 sessions, digest `ed83640bfe2ef898`, survivorship-flagged. Quality gate is **Phase 1**.
 
 ## Phase 0 — foundation and data spine
 
@@ -39,7 +37,8 @@ quality gate is **Phase 1**, not Phase 0.
 | `10-backfill-crawler.doc.md` | `core/universe.py`, `adapters/universe/`, `ingest/backfill.py` | Building the corpus |
 | `11-seed-data.plan.md` | **Plan** for §12.1 stage 2 — vendor facts, where files live, commit sequence | Starting seed-data work |
 | `12-seed-feeds.doc.md` | `adapters/feeds/` + `neurotrade seed` — the sample feeds, the commands, what is in the corpus | Touching seed data |
-| `13-daily-bars.doc.md` | `adapters/feeds/yfinance_daily.py` + `neurotrade daily backfill` — daily bars from Yahoo, and why they are unadjusted | Touching daily bars or universe history |
+| `13-daily-bars.doc.md` | `adapters/feeds/yfinance_daily.py` + `neurotrade daily backfill` — daily bars from Yahoo, and why they are unadjusted | Touching daily bars |
+| `14-universe-history.doc.md` | `ingest/universe_history.py` + `neurotrade universe build` — point-in-time membership, the PIT rule, the bias flag | Touching the universe or anything point-in-time |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Non-obvious traps with their fixes | **Before writing code — highest value per token** |
 
 ## Why the working agreements exist

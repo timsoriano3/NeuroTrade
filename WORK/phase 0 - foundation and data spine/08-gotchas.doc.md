@@ -76,11 +76,37 @@ own default). Qualify uses `asyncio.wait_for`; history passes `timeout=` into
 `ibkr backfill` failed 5 cells cleanly with "resolving X went unanswered for 10.0s" and stopped
 the pass (exit 1) instead of hanging.
 
+**IBKR's VWAP can fall outside its own bar, and it used to cost the whole session.**
+Live, 2026-09-15: JPM came back with `average=344.576` against a high of `344.57`. `Bar` rejected
+it — correctly — and because `fetch_bars` builds every bar in one comprehension, the entire
+390-bar session was lost over one auxiliary field. `average` carries more decimals than the
+tick-rounded high and low it ships beside, so it can land thousandths outside the range.
+
+**Fixed:** `_checked_vwap` drops the VWAP and keeps the bar. Dropped, not clamped — a clamped
+price is a number no trade printed, and `vwap` is already optional. Counts and the worst excess
+per symbol are exposed as `IbkrMarketData.vwap_drops()` and printed by `ibkr backfill`, so a
+rounding artefact stays distinguishable from a feed that is actually wrong.
+
 **`ib_insync` is archived; `ib_async` is the successor.** Training data and search results are
 full of `ib_insync` answers. Use context7 for this API rather than recall.
 
 **Gateway ≠ TWS.** Gateway has no "Enable ActiveX and Socket Clients" checkbox; its socket is
 always on. Gateway's API mode must be **IB API**, not FIX CTCI.
+
+## Universe history
+
+**A corpus that runs past `--end` must not fail the build.** The screen maps each bar to its
+session by the calendar, so reading to the end of the corpus made every bar after `--end` match no
+session and raise. The read is now bounded at both ends by the window's own sessions. Caught by a
+test, not by the live run, because the live run happened to end where the corpus did.
+
+**Eligibility has to be gated on the symbol's own venue.** Without that check the first real build
+returned 43 of 43 members on *every* date — including the TSX names on days the TSX was shut. A
+date is a decision point if any venue traded; an instrument is only eligible if its own venue did.
+
+**`Price` is already positive by construction**, so a second "must be positive" check on a price
+floor is dead code with its own error message to keep in step. `Money` is not — it may be
+negative, since losses are money — so the dollar-volume floor does need its own guard.
 
 ## Vendor sample files
 

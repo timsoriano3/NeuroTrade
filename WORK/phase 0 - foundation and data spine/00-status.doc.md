@@ -43,14 +43,15 @@ it in yet. See `09-venue-calendar.doc.md`.
 
 Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is Phase 1.
 
-- **IBKR backfill crawler** (§12.1 stage 1, "week 1") — pacing-aware, resumable, runs
-  continuously. `ingest/backfill.py` walks the universe against the calendar and yields the
-  sessions that are short; `ingest/crawler.py` drains that queue through `MarketDataPort` into
-  `StoragePort` and reports what happened; `neurotrade ibkr backfill` / `make backfill` runs it
-  against IBKR. The corpus is still empty: every live attempt so far (2026-09-12, weekend) hit
-  IBKR's data-farm outage — first as a hang with no timeout, then (after adding
-  `request_timeout_seconds`, see `08-gotchas.doc.md`) as a clean per-cell failure — see
-  `10-backfill-crawler.doc.md`. What is left is a weekday crawl with the farms up.
+- **IBKR backfill crawler** (§12.1 stage 1, "week 1") — **crawling.** `ingest/backfill.py` walks
+  the universe against the calendar and yields the sessions that are short; `ingest/crawler.py`
+  drains that queue through `MarketDataPort` into `StoragePort`; `make backfill` runs it. The
+  weekend data-farm outage that blocked every earlier attempt is gone: on 2026-09-15 (a weekday,
+  farms up) the first live crawls filled **47,580 minute bars over 41 instruments, 2026-09-11 →
+  2026-09-15**, in `raw/bars/`. The pacer throttled as designed — 55 requests, then a 600s wait.
+  One cell failed on a VWAP outside its own bar, since fixed (`08-gotchas.doc.md`). What is left
+  is depth: at 55 requests per 10 minutes, the §12.1 target is weeks of crawling, which is what
+  the spec expects. See `10-backfill-crawler.doc.md`.
 - ~~**Free sample seed data** (§12.1 stage 2)~~ — **done.** `make seed` fetches both vendors and
   ingests them through the same crawler; 1,019,421 bars are in `derived/seed/` as of 2026-09-15.
   FRD's sample is now known to be **unadjusted** (checked against yfinance, 2026-09-15); the
@@ -58,9 +59,14 @@ Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is 
 - **yfinance daily bars** (§12.1 stage 3, first half) — **done.** `make daily` crawls Yahoo
   through the same crawler at `1d`; 53,879 unadjusted bars over 43 instruments, 2021-09-15 →
   2026-09-11, in `derived/daily/yfinance/`, `.TO` lines included. See `13-daily-bars.doc.md`.
-- **Universe history** (§12.1 stage 3, second half) — not started. The daily corpus it would be
-  built from now exists; yfinance lists only surviving names, so any membership history from it
-  is survivorship-biased and has to say so.
+- ~~**Universe history** (§12.1 stage 3, second half)~~ — **done.** `make universe` screens the
+  daily corpus into point-in-time membership: 1,202 sessions, 2022-01-03 → 2026-09-11, 14–43
+  members of 43, digest `ed83640bfe2ef898`, in `derived/universe/yfinance/`. The trailing window
+  ends at `t-1`, floors are per-currency, and the artifact carries a survivorship-bias flag
+  because yfinance lists only surviving names. See `14-universe-history.doc.md`.
+
+**§12.1 stages 1–3 are all now delivered.** What Phase 0 still owes is corpus *depth*, which is
+crawl time rather than code.
 
 Corpus target before Phase 5: 3–5 years of 1-minute bars across US + TSX, ~2,000 symbols,
 well under 100 GB compressed.

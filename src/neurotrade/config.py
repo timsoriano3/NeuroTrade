@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -163,6 +164,60 @@ class IbkrSettings(BaseModel):
         return self.port in (4002, 7497)
 
 
+class LiquidityFloorSettings(BaseModel):
+    """The liquidity bar for one currency, before it becomes value objects.
+
+    Amounts are `Decimal` and are written quoted in YAML: a bare `5.0` would
+    arrive as a float and bring a binary artefact into a threshold that decides
+    membership.
+
+    Example:
+        >>> LiquidityFloorSettings(min_median_dollar_volume="1e6", min_close="5").min_close
+        Decimal('5')
+    """
+
+    min_median_dollar_volume: Decimal = Field(gt=0)  # median traded value over the window
+    min_close: Decimal = Field(gt=0)  # last close; same currency as the amount above
+
+
+class UniverseScreenSettings(BaseModel):
+    """The point-in-time liquidity screen behind universe history (§12.1 stage 3).
+
+    Not environmental: these thresholds decide which instruments a strategy was
+    allowed to see, so they belong in the config hash. Moving a floor changes
+    the answer, and a trade record has to show which floor produced it.
+
+    Defaults are deliberately unambitious — enough to exclude names that cannot
+    absorb an order, not an attempt at selection. §5's Universe Selector ranks;
+    this only screens.
+
+    Example:
+        >>> UniverseScreenSettings().lookback_sessions
+        20
+    """
+
+    lookback_sessions: int = Field(default=20, ge=1)
+    """Sessions in the trailing window, all strictly before the session being
+    decided. Twenty is about a trading month: long enough that one quiet week
+    does not evict a name, short enough to react within a quarter."""
+
+    floors: dict[str, LiquidityFloorSettings] = Field(
+        default_factory=lambda: {
+            "USD": LiquidityFloorSettings(
+                min_median_dollar_volume=Decimal("20000000"), min_close=Decimal("5")
+            ),
+            "CAD": LiquidityFloorSettings(
+                min_median_dollar_volume=Decimal("5000000"), min_close=Decimal("5")
+            ),
+        }
+    )
+    """One floor per settlement currency, keyed by ISO code. Two currencies
+    rather than one converted threshold: converting needs a point-in-time rate
+    this layer does not have, and `Money` refuses the comparison anyway. The
+    Canadian floor is lower because the TSX is a smaller market — the same
+    absolute threshold would screen out most of it."""
+
+
 class Settings(BaseSettings):
     """Fully resolved configuration for one process.
 
@@ -192,6 +247,10 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", json_schema_extra=ENVIRONMENTAL)
     """How loudly to log. Environmental: verbosity cannot change a decision."""
+
+    universe_screen: UniverseScreenSettings = Field(default_factory=UniverseScreenSettings)
+    """Thresholds for point-in-time universe membership. Hashed: unlike a port
+    number, a floor here changes which instruments were tradable."""
 
     ibkr: IbkrSettings = Field(default_factory=IbkrSettings, json_schema_extra=ENVIRONMENTAL)
     """Where the broker is. Environmental: which socket we dial does not change
@@ -347,6 +406,10 @@ def _canonical(value: object) -> object:
         return value.value
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, Decimal):
+        # str, not float: a threshold of 20000000 must hash the same however
+        # the YAML spelled it, and float() would round-trip some values wrong.
+        return str(value)
     return value
 
 
@@ -358,7 +421,7 @@ def behavioural_values(settings: Settings) -> dict[str, object]:
 
     Example:
         >>> sorted(behavioural_values(load_settings("research")))
-        ['allow_live_orders', 'profile']
+        ['allow_live_orders', 'profile', 'universe_screen']
     """
     dumped = settings.model_dump()
     return {
