@@ -1,75 +1,94 @@
-# The seed feeds — FirstRateData and Kibot
+# Seed data — the FirstRateData and Kibot samples, fetched and ingested
 
 §12.1 stage 2: "seed with FirstRateData and Kibot free samples so the lab has something to work
-with immediately". The reading half exists — `adapters/feeds/`. The commands that run it
-(`seed fetch`, `seed ingest`) are commit 2; see `11-seed-data.plan.md` for the plan and the
-vendor facts behind it.
+with immediately". **Done and in the corpus.** `11-seed-data.plan.md` holds the vendor facts and
+the decisions behind the shape.
 
-## What the package holds
+## What exists
 
 `adapters/feeds/` — `seed_sources.py` (`config/seed_sources.yaml` → vendor file ↔ `Symbol`),
-`vendor_download.py` (fetch + manifest), `firstrate.py` and `kibot.py` (the feeds), `_bars.py`
-(the shared time conversion), `errors.py` (`FeedError`).
+`vendor_download.py` (fetch, manifest, and snapshot read-back), `firstrate.py` and `kibot.py`
+(the feeds), `_bars.py` (the shared time conversion), `errors.py` (`FeedError`).
 
-**Both vendors enter through `MarketDataPort`,** exactly as `ibkr/market_data.py` does, so
-`ingest/crawler.py` drives them unchanged: same calendar trim, same resumability, same
-`CrawlReport`. That is the point — a second ingestion path is how research and live drift apart,
-and the spec's one-implementation rule (§3.6) is the project's primary failure mode.
+Two commands in `cli.py`, with `make seed` / `seed-fetch` / `seed-ingest`:
 
-A feed reads a file already on disk and nothing else. It holds a `Symbol → Path` mapping and a
-`Clock`, parses each file once and caches it, answers only `MIN_1`, and rejects a symbol it was
-not configured with. Downloading is a separate concern in `vendor_download.py`.
+```bash
+make seed                                  # fetch then ingest, every vendor
+make seed-fetch SOURCE=kibot               # one vendor
+make seed-ingest SNAPSHOT=2026-09-16       # an older dated snapshot
+```
 
-## The conversion, in `_bars.py`
+`seed fetch` downloads into `raw/vendor/<source>/<UTC date>/` beside a `manifest.json`.
+`seed ingest` hands one snapshot's files to the feed and crawls them into
+`derived/seed/<source>/`.
 
-Both vendors stamp a bar at its **open**, in **US/Eastern**, as naive local time.
-`close_ts_ns(open_et, interval)` attaches `ZoneInfo("America/New_York")`, converts through
-`to_nanos`, and adds one interval — `Bar.ts_event` is the close. Getting this backwards is the
-same silent lookahead the IBKR adapter guards against, on every bar, forever.
+**Both vendors enter through `MarketDataPort`, and ingest is the existing `crawl`** — the same
+calendar trim, resumability and `CrawlReport` the IBKR backfill gets, not a second ingestion path
+(§3.6, the project's primary failure mode). The wiring lives in `cli.py` because `ingest/` may not
+import a concrete adapter.
 
-It rejects an already-aware datetime rather than converting it: a caller passing UTC here has
-misread the file's timezone, and the result would be off by four or five hours without failing.
+## Decisions worth knowing
 
-**Why the feed needs no calendar.** FRD files carry 04:00–20:00 ET, the corpus is regular hours
-only, and the crawler already trims each fetch to `session.holds_bar`. Adding a calendar here
-would duplicate that and give it a second chance to disagree.
+**The crawl range comes from the files.** `FirstRateFeed.coverage()` / `KibotFeed.coverage()`
+return the first and last **ET session date** the configured files hold, and that is what
+`seed ingest` crawls. A `--start`/`--end` pair would be wrong as soon as it moved: FRD's window is
+fixed but written nowhere in the file, and Kibot's rolls. The date is the *open's* ET date,
+recovered by undoing the open→close shift — see the gotcha below.
 
-## Provenance and immutability
+**Bars land in `derived/seed/<source>/`, one root per vendor, never in `raw/bars/`.** The catalog
+counts bars without looking at provenance and the store keeps the first row for a
+`(interval, ts_event, seq)`, so a sample bar in the IBKR root would both mark that session complete
+for the backfill and outrank IBKR's own bar for the same minute. Tested.
 
-`vendor_download.py` writes to `<raw_dir>/vendor/<source>/<YYYY-MM-DD>/<original name>`, via a
-temp file and `os.replace`, and **refuses to overwrite an existing file**. Each folder carries a
-`manifest.json` — url, sha256, bytes, `fetched_at`, and adjustment basis (`unadjusted` for Kibot,
-`unknown` for FRD, which has no unadjusted variant).
+**Provenance is explicit.** `_SEED_PROVENANCE` maps `SeedSource → storage `Source`` rather than
+relying on the two enums sharing their string values, and a test asserts every vendor has both an
+entry and a feed. `seed_ingest_complete` logs the sha256 of every file in the snapshot: a vendor
+sample is not reproducible, so "which rows were these" can only be answered by the digest of the
+bytes they came from.
 
-The folder is dated because **Kibot's window rolls**: its file is the last ~3 months, so two
-fetches a week apart are different data, not a retry. The dated folder makes that visible rather
-than silently replacing history.
+**A missing manifest fails the ingest.** Rows whose bytes cannot be identified afterwards do not
+belong in the corpus. A *partial* snapshot is fine — absent files are reported and the rest is
+taken.
 
-Where the bars land is **`derived/seed/<source>/`, never `raw/bars/`** (the IBKR root). The
-catalog counts bars without looking at source and the store keeps the first row written for a
-`(interval, ts_event, seq)`, so sample bars in the IBKR root would both mark those sessions
-complete and win over IBKR's own bars for the same minutes.
+**Re-running is safe.** The crawler plans from the corpus, so a second ingest of the same snapshot
+writes nothing. A second *fetch* on the same UTC day fails on purpose (raw is immutable).
 
 ## Not done
 
-- **`seed fetch` / `seed ingest` commands and the make target** — commit 2. Nothing has been
-  ingested into the real corpus yet; the live check below used a scratch root.
-- **FRD's adjustment basis** is still unverified — `manifest.json` records `unknown`. Commit 2
-  settles it against yfinance around an ex-dividend date.
-- **VXX and OIH venues** in `config/seed_sources.yaml` are guesses until an IBKR qualify
-  resolves them; the file says so.
-- Splits, dividends, gap and halt marking are stage 5 (Phase 1), not here.
+- **FRD's adjustment basis is still unverified** — `manifest.json` records `unknown`. The yfinance
+  check the plan wanted cannot run yet: yfinance is not installed (§12.1 stage 3). The datum to
+  compare against is recorded below.
+- **The Kibot-vs-IBKR overlap check is blocked** on a successful weekday IBKR crawl; `raw/bars/`
+  is still empty.
+- Splits, dividends, gap and halt marking are stage 5 (Phase 1).
+- VXX and OIH venues in `config/seed_sources.yaml` are guesses until an IBKR qualify resolves
+  them; the file says so.
 
-## Verified
+## Verified this session (2026-09-15)
 
-`make check` PASS, 1076 tests (62 of them in `tests/adapters/feeds/`), 7 import contracts,
-`docs-check` clean. Live, against the real vendors this session:
+`make check` PASS — 1128 tests, 3 deselected (ibkr), 7 import contracts, `docs-check` clean.
 
-- FRD AAPL, March 2023 — 23 sessions, 8,970 bars, exactly 23 × 390.
-- Kibot IBM unadjusted, July 2026 — 22 sessions; first bar 13:31 UTC, last 20:00 UTC.
-- A second pass re-offered one session that is one bar short, which is the crawler's known
-  permanent-shortfall case, not a feed bug.
-- Kibot's adjusted and unadjusted files disagree (first open 270.06 vs 272.00 on 2026-06-15),
-  which is what confirms the `_unadjusted` files are the right ones to take.
+Live `make seed-fetch` → 12 files (10 FRD zips, 2 Kibot `_unadjusted`), 21 MB + 2.2 MB, in
+`data/raw/vendor/*/2026-09-16/` (the folder is UTC-dated). Live `make seed-ingest` →
+**1,019,421 bars**: firstrate 974,635 over 2,510 instrument-sessions, 2022-09-30 → 2023-09-29;
+kibot 44,786 over 124, 2026-06-17 → 2026-09-15. Both spans came from the files, not from a flag.
+
+Per-symbol, checked against `VenueCalendar.expected_bars`:
+
+| | Sessions | Bars | Complete sessions |
+|---|---|---|---|
+| AAPL AMZN MSFT META TSLA QQQ (NASDAQ) | 251 each | 97,530 each | 251/251 |
+| SPY | 251 | 97,526 | 250 |
+| EEM | 251 | 97,490 | 225 |
+| DIA | 251 | 97,332 | 141 |
+| VXX | 251 | 97,107 | 124 |
+| IBM (kibot) | 62 | 24,167 | 52 |
+| OIH (kibot) | 62 | 20,619 | 2 |
+
+**No session anywhere holds more than its expected bars**, which is what proves the extended-hours
+trim (FRD carries 04:00–20:00 ET) and the half-day closes came out right.
+
+AAPL's last FRD session, 2023-09-29: 390 bars, first open `172.02`, last close `171.22` — the
+numbers a stage-3 yfinance check will compare to settle the adjustment question.
 
 Traps found building it are in `08-gotchas.doc.md`.

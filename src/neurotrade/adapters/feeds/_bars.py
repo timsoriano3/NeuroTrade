@@ -9,14 +9,15 @@ through `close_ts_ns`.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from neurotrade.core.clock import Nanos, to_nanos
+from neurotrade.core.clock import Nanos, to_datetime, to_nanos
 from neurotrade.core.events import BarInterval
 
-__all__ = ["PreparedBar", "close_ts_ns"]
+__all__ = ["PreparedBar", "close_ts_ns", "covered_dates"]
 
 EASTERN = ZoneInfo("America/New_York")
 """Both vendors' files are ET, naive — no offset in the row. Attaching this via
@@ -70,3 +71,39 @@ def close_ts_ns(open_et: datetime, interval: BarInterval) -> Nanos:
         raise ValueError(f"expected a naive local time, got {open_et!r}")
     aware = open_et.replace(tzinfo=EASTERN)
     return to_nanos(aware) + interval.nanos
+
+
+def covered_dates(rows: Iterable[PreparedBar], interval: BarInterval) -> tuple[date, date] | None:
+    """The first and last ET session date a set of parsed rows covers.
+
+    Lets a caller crawl a vendor file over exactly the range it holds, instead
+    of being told the window: FirstRateData's is fixed but undocumented in the
+    file, and Kibot's rolls (`08-gotchas.doc.md`), so any hardcoded range is
+    wrong eventually and fails by quietly ingesting less than the file has.
+
+    The date is the **open's** date in Eastern, recovered by undoing
+    `close_ts_ns`. Taking it from the UTC close instead would put a 20:00 ET
+    bar on the following day, and the range would miss that session's own
+    trading day at either end.
+
+    Args:
+        rows: Parsed rows, in any order.
+        interval: The bar length the rows were parsed with, to undo the shift.
+
+    Returns:
+        `(first, last)` inclusive, or None if `rows` is empty.
+
+    Example:
+        >>> rows = [
+        ...     PreparedBar(close_ts_ns(datetime(2023, 1, 3, 9, 30), BarInterval.MIN_1),
+        ...                 1.0, 1.0, 1.0, 1.0, 1.0),
+        ...     PreparedBar(close_ts_ns(datetime(2023, 1, 4, 15, 59), BarInterval.MIN_1),
+        ...                 1.0, 1.0, 1.0, 1.0, 1.0),
+        ... ]
+        >>> covered_dates(rows, BarInterval.MIN_1)
+        (datetime.date(2023, 1, 3), datetime.date(2023, 1, 4))
+    """
+    dates = [to_datetime(row.ts_event - interval.nanos).astimezone(EASTERN).date() for row in rows]
+    if not dates:
+        return None
+    return min(dates), max(dates)

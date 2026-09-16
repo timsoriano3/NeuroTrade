@@ -8,7 +8,7 @@ the IBKR backfill has run long enough to matter (TRADER_PLAN §12.1 stage 2).
 | File | What it does |
 |---|---|
 | `seed_sources.py` | `SeedSourcesFile` — reads `config/seed_sources.yaml` into vendor file → `Symbol` entries |
-| `vendor_download.py` | Downloads the FRD and Kibot free samples over plain HTTPS, writes them under `<raw_dir>/vendor/<source>/<date>/` with a `manifest.json` |
+| `vendor_download.py` | Downloads the FRD and Kibot free samples over plain HTTPS, writes them under `<raw_dir>/vendor/<source>/<date>/` with a `manifest.json`, and reads those snapshots back (`snapshots`, `latest_snapshot`, `read_manifest`) |
 | `firstrate.py` | `FirstRateFeed` — `MarketDataPort` reading a FirstRateData sample zip already on disk |
 | `kibot.py` | `KibotFeed` — `MarketDataPort` reading a Kibot `_unadjusted` sample file already on disk |
 | `_bars.py` | The ET-open to UTC-close conversion shared by both feeds |
@@ -22,13 +22,30 @@ same calendar trim, resumability and outcome reporting apply with no second
 ingestion path. This layer only reads a file already on disk; deciding what to
 crawl, and where the file came from, is the caller's job.
 
-## The download step is optional
+## Who drives this
 
-`vendor_download.py` is a convenience, not a requirement: both vendors serve
-plain HTTPS with no login, so a `seed fetch` command (Phase 0 commit 2) is
-just automation on top of it. A file dropped into
+`neurotrade seed fetch` and `neurotrade seed ingest` (in `cli.py`, with
+`make seed`) are the only callers: fetch writes a dated snapshot, ingest hands
+the files in it to the feed below and crawls it into
+`<derived_dir>/seed/<source>/`. The composition lives in the CLI because
+`ingest/` may not import a concrete adapter.
+
+The download step is a convenience, not a requirement: both vendors serve
+plain HTTPS with no login. A file dropped into
 `<raw_dir>/vendor/<source>/<date>/` by hand works identically — the feeds only
-read the directory, however the file got there.
+read the directory, however the file got there — as long as the folder's
+`manifest.json` describes it, which is what `seed ingest` reads the provenance
+from.
+
+## The crawl range comes from the files
+
+`FirstRateFeed.coverage()` and `KibotFeed.coverage()` report the first and
+last ET session date the configured files hold, which is what `seed ingest`
+crawls over. A range typed in by hand would be wrong as soon as it moved:
+FRD's window is fixed but undocumented in the file itself, and Kibot's rolls.
+The date is the **open's** date in Eastern, recovered by undoing the
+open-to-close shift below — a 19:59 ET bar closes at 00:59 UTC the next day,
+and dating it by the close would stretch the span past what the file holds.
 
 ## Vendor files are raw and immutable
 

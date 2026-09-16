@@ -7,24 +7,33 @@ whatever consumes it.
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import pyarrow.dataset as ds
 import pytest
 import structlog
 from typer.testing import CliRunner
 
 from neurotrade import __version__
 from neurotrade.adapters.calendar.venue_calendar import VenueCalendar
+from neurotrade.adapters.feeds.seed_sources import SeedSource
+from neurotrade.adapters.feeds.vendor_download import latest_snapshot, read_manifest
 from neurotrade.adapters.ibkr.connection import IbkrConnectionError
-from neurotrade.cli import app
+from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
+from neurotrade.cli import _SEED_PROVENANCE, _seed_feed, _SeedJob, app
 from neurotrade.config import Profile, config_hash, load_settings
-from neurotrade.core.clock import SimClock, to_nanos
+from neurotrade.core.clock import LiveClock, SimClock, to_nanos
 from neurotrade.core.events import Bar, BarInterval, Event
 from neurotrade.core.types import Price, Quantity, Symbol, Venue
 from neurotrade.logs import clear_context
+from tests.adapters.feeds.conftest import FakeOpener, FakeResponse
 
 runner = CliRunner()
 
@@ -701,3 +710,473 @@ def test_default_end_is_yesterday_utc(tmp_path: Path, monkeypatch: pytest.Monkey
     # Yesterday UTC is 2024-07-08; the range must reach it and no further.
     assert "2024-07-08" in result.stderr
     assert "2024-07-09" not in result.stderr
+
+
+# ── seed: fixtures ────────────────────────────────────────────
+
+# Real NASDAQ sessions, as the backfill fixtures above use: 07-01 and 07-02
+# are ordinary 390-bar days, 07-03 is the pre-July-4th half day (210 bars).
+# Vendor rows below are hand-written in each vendor's own format — no real
+# vendor bytes are committed (`11-seed-data.plan.md` decision 4).
+_FRD_AAPL_URL = "https://frd001.s3-us-east-2.amazonaws.com/AAPL_1min_sample_firstratedata.zip"
+_KIBOT_PAGE_URL = "https://www.kibot.com/free-historical-intraday-data.html"
+_KIBOT_LINK = "https://api.kibot.com/?get=code1"
+_AAPL_SAMPLE = "AAPL_1min_sample_firstratedata.zip"
+
+
+def _seed_sources_file(tmp_path: Path, entries: list[tuple[str, str, str, str]]) -> Path:
+    """A seed sources file in the format `config/seed_sources.yaml` uses."""
+    lines = ["version: 1", "entries:"]
+    for source, ticker, venue, name in entries:
+        lines.append(f"  - source: {source}")
+        lines.append(f"    ticker: {ticker}")
+        lines.append(f"    venue: {venue}")
+        lines.append(f"    file: {name}")
+    path = tmp_path / "seed_sources.yaml"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _et_minutes(day: date, first: str, count: int) -> Iterator[datetime]:
+    """`count` consecutive minute opens from `first`, naive ET, as the files are."""
+    hour, minute = (int(part) for part in first.split(":"))
+    # Naive on purpose: both vendors write local ET with no offset, and the
+    # feed is what attaches the zone. noqa DTZ001 for exactly that reason.
+    start = datetime(day.year, day.month, day.day, hour, minute)  # noqa: DTZ001
+    for index in range(count):
+        yield start + timedelta(minutes=index)
+
+
+def _frd_rows(days: list[date], *, first: str = "09:30", count: int = 390) -> str:
+    rows = ["timestamp,open,high,low,close,volume"]
+    rows += [
+        f"{stamp:%Y-%m-%d %H:%M:%S},100.0,101.0,99.0,100.5,10"
+        for day in days
+        for stamp in _et_minutes(day, first, count)
+    ]
+    return "\n".join(rows) + "\n"
+
+
+def _kibot_rows(days: list[date], *, first: str = "09:30", count: int = 390) -> str:
+    return (
+        "\n".join(
+            f"{stamp:%m/%d/%Y},{stamp:%H:%M},100.0,101.0,99.0,100.5,10"
+            for day in days
+            for stamp in _et_minutes(day, first, count)
+        )
+        + "\n"
+    )
+
+
+def _frd_zip_bytes(days: list[date], *, first: str = "09:30", count: int = 390) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("AAPL_1min.csv", _frd_rows(days, first=first, count=count))
+    return buffer.getvalue()
+
+
+def _snapshot(
+    tmp_path: Path, source: str, day: str, files: dict[str, bytes], *, adjusted: str = "unknown"
+) -> Path:
+    """A fetched snapshot folder, files plus the manifest `seed fetch` writes."""
+    folder = tmp_path / "raw" / "vendor" / source / day
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest = {}
+    for name, data in files.items():
+        (folder / name).write_bytes(data)
+        manifest[name] = {
+            "name": name,
+            "url": f"https://example.invalid/{name}",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "fetched_at": 0,
+            "adjusted": adjusted,
+        }
+    (folder / "manifest.json").write_text(json.dumps(manifest))
+    return folder
+
+
+def _patch_opener(
+    monkeypatch: pytest.MonkeyPatch, responses: dict[str, FakeResponse]
+) -> FakeOpener:
+    """Replace the real HTTP opener so `seed fetch` never reaches a network."""
+    opener = FakeOpener(responses)
+    monkeypatch.setattr("neurotrade.adapters.feeds.vendor_download.UrllibOpener", lambda: opener)
+    return opener
+
+
+# ── seed fetch ────────────────────────────────────────────────
+
+
+def test_seed_fetch_writes_a_dated_snapshot_with_a_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _patch_opener(monkeypatch, {_FRD_AAPL_URL: FakeResponse(b"zip-bytes")})
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(app, ["seed", "fetch", "--sources", str(sources)])
+
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.strip() == "1"  # stdout carries only the count
+    folder = latest_snapshot(tmp_path / "raw", "firstrate")
+    assert folder is not None
+    assert (folder / _AAPL_SAMPLE).read_bytes() == b"zip-bytes"
+    assert [record.adjusted for record in read_manifest(folder)] == ["unknown"]
+
+
+def test_seed_fetch_takes_one_vendor_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    opener = _patch_opener(
+        monkeypatch,
+        {
+            _KIBOT_PAGE_URL: FakeResponse(f'<a href="{_KIBOT_LINK}">IBM</a>'.encode()),
+            _KIBOT_LINK: FakeResponse(
+                b"rows", content_disposition='attachment; filename="IBM_unadjusted.txt"'
+            ),
+        },
+    )
+    sources = _seed_sources_file(
+        tmp_path,
+        [
+            ("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE),
+            ("kibot", "IBM", "NYSE", "IBM_unadjusted.txt"),
+        ],
+    )
+
+    result = runner.invoke(app, ["seed", "fetch", "--source", "kibot", "--sources", str(sources)])
+
+    assert result.exit_code == 0, result.stdout
+    assert _FRD_AAPL_URL not in opener.opened
+    assert latest_snapshot(tmp_path / "raw", "firstrate") is None
+
+
+def test_seed_fetch_rejects_a_missing_sources_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    result = runner.invoke(app, ["seed", "fetch", "--sources", str(tmp_path / "absent.yaml")])
+    assert result.exit_code == 2
+
+
+def test_seed_fetch_refuses_to_overwrite_the_same_days_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kibot's window rolls, so a second fetch is new data rather than a
+    retry; clobbering the first would destroy the only copy of those rows."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _patch_opener(monkeypatch, {_FRD_AAPL_URL: FakeResponse(b"zip-bytes")})
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    assert runner.invoke(app, ["seed", "fetch", "--sources", str(sources)]).exit_code == 0
+    again = runner.invoke(app, ["seed", "fetch", "--sources", str(sources)])
+
+    assert again.exit_code == 1
+    assert "refusing to overwrite" in again.stderr
+
+
+def test_seed_fetch_fails_when_the_config_names_a_file_the_vendor_does_not_serve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`seed ingest` finds a file by the configured name while the FRD
+    downloader derives it from the ticker; a drifted `file:` must fail the
+    fetch rather than produce an ingest that finds nothing."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _patch_opener(monkeypatch, {_FRD_AAPL_URL: FakeResponse(b"zip-bytes")})
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", "AAPL_wrong.zip")])
+
+    result = runner.invoke(app, ["seed", "fetch", "--sources", str(sources)])
+
+    assert result.exit_code == 1
+    assert "AAPL_wrong.zip" in result.stderr
+
+
+# ── seed ingest ───────────────────────────────────────────────
+
+
+def _ingest_firstrate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    days: list[date],
+    *,
+    first: str = "09:30",
+    count: int = 390,
+    args: list[str] | None = None,
+) -> tuple[int, str, str]:
+    """Put a FRD snapshot on disk and ingest it. Returns exit code, out, err."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path,
+        "firstrate",
+        "2026-09-13",
+        {_AAPL_SAMPLE: _frd_zip_bytes(days, first=first, count=count)},
+    )
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources), *(args or [])])
+    return result.exit_code, result.stdout, result.stderr
+
+
+def test_seed_ingest_writes_the_sessions_the_file_covers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, _ = _ingest_firstrate(tmp_path, monkeypatch, [date(2024, 7, 1), date(2024, 7, 2)])
+
+    assert code == 0, out
+    assert out.strip() == "780"  # 2 x 390
+    counts = DuckDBCatalog(tmp_path / "derived" / "seed" / "firstrate").bar_counts(
+        Symbol("AAPL", Venue.NASDAQ), BarInterval.MIN_1
+    )
+    assert counts == {date(2024, 7, 1): 390, date(2024, 7, 2): 390}
+
+
+def test_seed_ingest_keeps_seed_bars_out_of_the_ibkr_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sample bar under `raw/bars/` would mark that session complete for the
+    backfill and outrank IBKR's own bar for the same minute."""
+    code, out, _ = _ingest_firstrate(tmp_path, monkeypatch, [date(2024, 7, 1)])
+
+    assert code == 0, out
+    assert not (tmp_path / "raw" / "bars").exists()
+
+
+def test_seed_ingest_trims_extended_hours_to_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FRD's file runs 04:00-20:00 ET; the corpus is regular hours only, and
+    the trim comes from the crawler the IBKR backfill also uses."""
+    code, out, _ = _ingest_firstrate(
+        tmp_path, monkeypatch, [date(2024, 7, 1)], first="04:00", count=960
+    )
+
+    assert code == 0, out
+    assert out.strip() == "390"
+
+
+def test_seed_ingest_respects_a_half_day_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2024-07-03 closed at 13:00 ET. The file has a full day of rows; only the
+    210 bars closing inside the session may be stored."""
+    code, out, _ = _ingest_firstrate(tmp_path, monkeypatch, [_HALF_DAY])
+
+    assert code == 0, out
+    assert out.strip() == "210"
+
+
+def test_seed_ingest_stamps_the_vendor_as_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provenance is the only way to know a bar's volume is a sample's, not
+    IBKR's consolidated volume (see `Source`)."""
+    code, out, _ = _ingest_firstrate(tmp_path, monkeypatch, [date(2024, 7, 1)])
+
+    assert code == 0, out
+    table = ds.dataset(tmp_path / "derived" / "seed" / "firstrate", format="parquet").to_table()
+    assert set(table.column("source").to_pylist()) == {"firstrate"}
+
+
+def test_seed_ingest_run_twice_writes_nothing_the_second_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crawler plans from the corpus, so re-running is cheap and safe."""
+    first_code, _, _ = _ingest_firstrate(tmp_path, monkeypatch, [date(2024, 7, 1)])
+    assert first_code == 0
+    sources = tmp_path / "seed_sources.yaml"
+    again = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert again.exit_code == 0, again.stdout
+    assert again.stdout.strip() == "0"
+
+
+def test_seed_ingest_reads_the_newest_snapshot_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path, "firstrate", "2026-09-13", {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1)])}
+    )
+    _snapshot(
+        tmp_path,
+        "firstrate",
+        "2026-09-15",
+        {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1), date(2024, 7, 2)])},
+    )
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.strip() == "780"
+
+
+def test_seed_ingest_can_be_pointed_at_an_older_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kibot's window rolls, so an older snapshot holds sessions the newest no
+    longer does."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path, "firstrate", "2026-09-13", {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1)])}
+    )
+    _snapshot(
+        tmp_path,
+        "firstrate",
+        "2026-09-15",
+        {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1), date(2024, 7, 2)])},
+    )
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(
+        app, ["seed", "ingest", "--sources", str(sources), "--snapshot", "2026-09-13"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.strip() == "390"
+
+
+def test_seed_ingest_rejects_a_snapshot_that_was_never_fetched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path, "firstrate", "2026-09-13", {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1)])}
+    )
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(
+        app, ["seed", "ingest", "--sources", str(sources), "--snapshot", "1999-01-01"]
+    )
+
+    assert result.exit_code == 2
+    assert "1999-01-01" in result.stderr
+
+
+def test_seed_ingest_says_what_to_run_when_nothing_was_fetched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 2
+    assert "seed fetch" in result.stderr
+
+
+def test_seed_ingest_takes_the_files_a_partial_snapshot_does_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fetch that got some tickers is still worth ingesting — say which are
+    absent and take the rest."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path, "firstrate", "2026-09-13", {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1)])}
+    )
+    sources = _seed_sources_file(
+        tmp_path,
+        [
+            ("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE),
+            ("firstrate", "MSFT", "NASDAQ", "MSFT_1min_sample_firstratedata.zip"),
+        ],
+    )
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.strip() == "390"
+    assert "absent" in result.stderr
+    assert "MSFT_1min_sample_firstratedata.zip" in result.stderr
+
+
+def test_seed_ingest_fails_when_the_snapshot_holds_none_of_the_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(tmp_path, "firstrate", "2026-09-13", {})
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 1
+    assert "no firstrate files" in result.stderr
+
+
+def test_seed_ingest_refuses_a_snapshot_with_no_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows whose bytes cannot be identified afterwards do not belong in the
+    corpus."""
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    folder = _snapshot(
+        tmp_path, "firstrate", "2026-09-13", {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1)])}
+    )
+    (folder / "manifest.json").unlink()
+    sources = _seed_sources_file(tmp_path, [("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE)])
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 1
+    assert "manifest.json" in result.stderr
+
+
+def test_seed_ingest_reads_kibots_headerless_format_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path,
+        "kibot",
+        "2026-09-13",
+        {"IBM_unadjusted.txt": _kibot_rows([date(2024, 7, 1)]).encode()},
+        adjusted="unadjusted",
+    )
+    sources = _seed_sources_file(tmp_path, [("kibot", "IBM", "NYSE", "IBM_unadjusted.txt")])
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.strip() == "390"
+    table = ds.dataset(tmp_path / "derived" / "seed" / "kibot", format="parquet").to_table()
+    assert set(table.column("source").to_pylist()) == {"kibot"}
+
+
+def test_seed_ingest_keeps_each_vendor_in_its_own_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
+    _snapshot(
+        tmp_path, "firstrate", "2026-09-13", {_AAPL_SAMPLE: _frd_zip_bytes([date(2024, 7, 1)])}
+    )
+    _snapshot(
+        tmp_path,
+        "kibot",
+        "2026-09-13",
+        {"IBM_unadjusted.txt": _kibot_rows([date(2024, 7, 1)]).encode()},
+        adjusted="unadjusted",
+    )
+    sources = _seed_sources_file(
+        tmp_path,
+        [
+            ("firstrate", "AAPL", "NASDAQ", _AAPL_SAMPLE),
+            ("kibot", "IBM", "NYSE", "IBM_unadjusted.txt"),
+        ],
+    )
+
+    result = runner.invoke(app, ["seed", "ingest", "--sources", str(sources)])
+
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.strip() == "780"
+    seed_root = tmp_path / "derived" / "seed"
+    assert {path.name for path in seed_root.iterdir()} == {"firstrate", "kibot"}
+
+
+def test_every_seed_source_has_a_provenance_and_a_feed() -> None:
+    """Adding a vendor without either would store rows under the wrong source,
+    or parse them with another vendor's format."""
+    for vendor in SeedSource:
+        assert vendor in _SEED_PROVENANCE
+        job = _SeedJob(source=vendor, folder=Path("."), files={}, manifest=())
+        assert _seed_feed(job, LiveClock()) is not None

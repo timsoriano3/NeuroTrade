@@ -62,11 +62,13 @@ Grouped by scope — two, not five.
    scrape, manifest, dated folders), *feeds: firstrate* and *feeds: kibot* — file-backed
    `MarketDataPort` feeds: parse, ET→UTC, open→close, RTH trim — plus
    `config/seed_sources.yaml` and the feeds README. Tests on hand-written vendor rows.
-2. **Seed commands and verification**: `neurotrade seed fetch` / `seed ingest` + *make seed*,
-   `crawl` each source into `derived/seed/<source>/` logging manifest sha256; a live fetch and
-   ingest; checks — Kibot IBM unadjusted vs the IBKR crawl on overlapping sessions (stamp
-   shift, price basis), FRD AAPL vs yfinance around an ex-dividend date (adjustment). Results
-   to `08-gotchas` either way. The IBKR overlap check waits for a weekday crawl if not yet run.
+2. **Seed commands and verification** — **DONE, see `12-seed-feeds.doc.md`**:
+   `neurotrade seed fetch` / `seed ingest` + *make seed* / *seed-fetch* / *seed-ingest*, each
+   source crawled into `derived/seed/<source>/` with the manifest sha256 logged, plus a live
+   fetch and ingest (1,019,421 bars). **Both cross-checks are still open and are blocked, not
+   skipped:** the Kibot-vs-IBKR overlap needs a successful weekday IBKR crawl (`raw/bars/` is
+   empty), and FRD AAPL vs yfinance needs yfinance, which arrives in stage 3. What the checks
+   will compare is recorded in `12-seed-feeds.doc.md`.
 
 ## Not in this stage
 
@@ -75,5 +77,6 @@ IBKR bars into one view for the lab → first Phase 1 consumer decides. yfinance
 
 ## Open
 
-- FRD adjustment basis — settled by commit 5; ingest as-is until then.
+- FRD adjustment basis — **still open**, deferred to stage 3 when yfinance lands; ingested
+  as-is, with `manifest.json` recording `unknown`.
 - Kibot `get=` codes may rotate; if the scrape finds no match, fetch fails loudly.

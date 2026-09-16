@@ -6,6 +6,7 @@ vendor download (`08-gotchas.doc.md`, `11-seed-data.plan.md` decision 4).
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -142,3 +143,22 @@ async def test_ts_init_comes_from_the_clock(tmp_path: Path) -> None:
     feed = KibotFeed({IBM: path}, clock)
     bars = await feed.fetch_bars(IBM, BarInterval.MIN_1, *FOREVER)
     assert bars[0].ts_init == 42
+
+
+# ── coverage() ──────────────────────────────────────────────────
+
+
+async def test_coverage_reports_the_session_dates_the_file_holds(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        [
+            "06/15/2026,09:30,100,101,99,100.5,1000\n",
+            "06/17/2026,15:59,100,101,99,100.5,1000\n",
+        ],
+    )
+    feed = KibotFeed({IBM: path}, SimClock(0))
+    assert feed.coverage() == (date(2026, 6, 15), date(2026, 6, 17))
+
+
+async def test_coverage_is_none_when_the_file_holds_no_row(tmp_path: Path) -> None:
+    assert KibotFeed({IBM: _write(tmp_path, [])}, SimClock(0)).coverage() is None

@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import csv
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
-from neurotrade.adapters.feeds._bars import PreparedBar, close_ts_ns
+from neurotrade.adapters.feeds._bars import PreparedBar, close_ts_ns, covered_dates
 from neurotrade.adapters.feeds.errors import FeedError
 from neurotrade.core.clock import Clock, Nanos
 from neurotrade.core.events import Bar, BarInterval
@@ -101,10 +101,7 @@ class KibotFeed:
         if path is None:
             raise FeedError(f"no kibot file configured for {symbol}")
 
-        prepared = self._cache.get(symbol)
-        if prepared is None:
-            prepared = _parse(path)
-            self._cache[symbol] = prepared
+        prepared = self._prepared(symbol, path)
 
         received_at = self._clock.now_ns()
         return tuple(
@@ -122,6 +119,46 @@ class KibotFeed:
             for row in prepared
             if start <= row.ts_event < end
         )
+
+    def coverage(self) -> tuple[date, date] | None:
+        """First and last session date the configured files hold, ET.
+
+        What `seed ingest` crawls over, so the command needs no knowledge of
+        either vendor's window — see `covered_dates` in `_bars.py` for why a
+        hardcoded range goes stale. Parses every configured file, which is the
+        same work `fetch_bars` would do and is cached with it.
+
+        Returns:
+            `(first, last)` inclusive, or None if no file holds a row.
+
+        Example:
+            >>> from neurotrade.core.clock import SimClock
+            >>> KibotFeed({}, SimClock(0)).coverage() is None
+            True
+        """
+        first: date | None = None
+        last: date | None = None
+        for symbol, path in self._files.items():
+            span = covered_dates(self._prepared(symbol, path), BarInterval.MIN_1)
+            if span is None:
+                continue
+            first = span[0] if first is None else min(first, span[0])
+            last = span[1] if last is None else max(last, span[1])
+        if first is None or last is None:
+            return None
+        return first, last
+
+    def _prepared(self, symbol: Symbol, path: Path) -> tuple[PreparedBar, ...]:
+        """Parsed rows for one file, parsed once and kept.
+
+        Raises:
+            FeedError: If the file does not parse.
+        """
+        prepared = self._cache.get(symbol)
+        if prepared is None:
+            prepared = _parse(path)
+            self._cache[symbol] = prepared
+        return prepared
 
     def __repr__(self) -> str:
         return f"KibotFeed(symbols={len(self._files)})"

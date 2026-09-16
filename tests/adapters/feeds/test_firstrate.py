@@ -7,6 +7,7 @@ download (`08-gotchas.doc.md`, `11-seed-data.plan.md` decision 4).
 from __future__ import annotations
 
 import zipfile
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -164,3 +165,46 @@ async def test_ts_init_comes_from_the_clock(tmp_path: Path) -> None:
     feed = FirstRateFeed({AAPL: path}, clock)
     bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, *FOREVER)
     assert bars[0].ts_init == 42
+
+
+# ── coverage() ──────────────────────────────────────────────────
+
+
+async def test_coverage_reports_the_session_dates_the_file_holds(tmp_path: Path) -> None:
+    path = _zip(
+        tmp_path,
+        "AAPL.zip",
+        [
+            "2023-01-03 09:30:00,100,101,99,100.5,1000\n",
+            "2023-01-05 15:59:00,100,101,99,100.5,1000\n",
+        ],
+    )
+    feed = FirstRateFeed({AAPL: path}, SimClock(0))
+    assert feed.coverage() == (date(2023, 1, 3), date(2023, 1, 5))
+
+
+async def test_coverage_dates_a_bar_by_its_et_open_not_its_utc_close(tmp_path: Path) -> None:
+    """The last extended-hours bar opens at 19:59 ET, which is 00:59 UTC the
+    next day. Dating it by the UTC close would put the file's span a day long
+    and make `seed ingest` crawl a session the file has no rows for."""
+    path = _zip(tmp_path, "AAPL.zip", ["2023-01-03 19:59:00,100,101,99,100.5,1000\n"])
+    feed = FirstRateFeed({AAPL: path}, SimClock(0))
+    assert feed.coverage() == (date(2023, 1, 3), date(2023, 1, 3))
+
+
+async def test_coverage_spans_every_configured_file(tmp_path: Path) -> None:
+    aapl = _zip(tmp_path, "AAPL.zip", ["2023-01-03 09:30:00,100,101,99,100.5,1000\n"])
+    msft = _zip(tmp_path, "MSFT.zip", ["2023-02-06 09:30:00,100,101,99,100.5,1000\n"])
+    feed = FirstRateFeed({AAPL: aapl, Symbol("MSFT", Venue.NASDAQ): msft}, SimClock(0))
+    assert feed.coverage() == (date(2023, 1, 3), date(2023, 2, 6))
+
+
+async def test_coverage_is_none_when_no_file_holds_a_row(tmp_path: Path) -> None:
+    path = _zip(tmp_path, "AAPL.zip", [])
+    assert FirstRateFeed({AAPL: path}, SimClock(0)).coverage() is None
+
+
+async def test_coverage_rejects_an_unparseable_file(tmp_path: Path) -> None:
+    path = _zip(tmp_path, "AAPL.zip", ["not,a,bar\n"])
+    with pytest.raises(FeedError):
+        FirstRateFeed({AAPL: path}, SimClock(0)).coverage()

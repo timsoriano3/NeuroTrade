@@ -18,6 +18,7 @@ as ``git --no-pager log``::
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,22 @@ import typer
 
 from neurotrade import __version__
 from neurotrade.adapters.calendar.venue_calendar import VenueCalendar
+from neurotrade.adapters.feeds.errors import FeedError
+from neurotrade.adapters.feeds.firstrate import FirstRateFeed
+from neurotrade.adapters.feeds.kibot import KibotFeed
+from neurotrade.adapters.feeds.seed_sources import (
+    InvalidSeedSourcesFile,
+    SeedEntry,
+    SeedSource,
+    SeedSourcesFile,
+)
+from neurotrade.adapters.feeds.vendor_download import (
+    VendorFile,
+    fetch_firstrate_samples,
+    fetch_kibot_samples,
+    latest_snapshot,
+    read_manifest,
+)
 from neurotrade.adapters.ibkr.broker import IbkrBroker
 from neurotrade.adapters.ibkr.connection import IbkrConnection, IbkrConnectionError
 from neurotrade.adapters.ibkr.market_data import IbkrMarketData
@@ -48,6 +65,7 @@ from neurotrade.core.events import BarInterval
 from neurotrade.core.ids import IntentId, OrderId, RunId
 from neurotrade.core.orders import Fill, Order, OrderType
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
+from neurotrade.core.universe import Universe
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
 from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
@@ -64,6 +82,18 @@ needing a venue calendar to know when the session ended."""
 _DEFAULT_UNIVERSE = DEFAULT_CONFIG_DIR / "universe.yaml"
 """The committed seed universe. A flag rather than a setting because the
 universe is data, not configuration — see `Universe.digest`."""
+
+_DEFAULT_SEED_SOURCES = DEFAULT_CONFIG_DIR / "seed_sources.yaml"
+"""Which vendor file describes which instrument. Data, like the universe."""
+
+_SEED_PROVENANCE: dict[SeedSource, Source] = {
+    SeedSource.FIRSTRATE: Source.FIRSTRATE,
+    SeedSource.KIBOT: Source.KIBOT,
+}
+"""Vendor to the `source` column stamped on its rows. Spelled out rather than
+relying on the two enums happening to share their values: a bar's provenance is
+what tells a feature whether its volume means anything (see `Source`), so the
+mapping is worth stating and worth a test."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +121,9 @@ app.add_typer(config_app, name="config")
 
 ibkr_app = typer.Typer(help="Talk to Interactive Brokers.", no_args_is_help=True)
 app.add_typer(ibkr_app, name="ibkr")
+
+seed_app = typer.Typer(help="Seed the corpus from free vendor sample files.", no_args_is_help=True)
+app.add_typer(seed_app, name="seed")
 
 
 @app.callback()
@@ -434,14 +467,6 @@ def ibkr_backfill(
 
     bars_root = settings.storage.raw_dir / "bars"
 
-    def report_cell(outcome: CellOutcome) -> None:
-        line = f"{outcome.status.value:<8} {outcome.symbol!s:<12} {outcome.session_date}"
-        if outcome.status is CellStatus.FILLED:
-            line += f"  {outcome.written} bars"
-        elif outcome.error is not None:
-            line += f"  {outcome.error}"
-        typer.echo(line, err=True)
-
     async def run() -> list[CrawlReport]:
         connection = IbkrConnection(settings.ibkr)
         feed = IbkrMarketData(connection, clock)
@@ -467,7 +492,7 @@ def ibkr_backfill(
                     source=Source.IBKR.value,
                     interval=interval,
                     limit=limit,
-                    on_outcome=report_cell,
+                    on_outcome=_echo_cell,
                 )
                 reports.append(report)
                 _log_pass(number, report, universe.digest, first, last, interval)
@@ -511,6 +536,340 @@ def _log_pass(
         start=str(first),
         end=str(last),
         interval=interval.value,
+        planned=report.planned,
+        requests=report.requests,
+        bars_written=report.bars_written,
+        filled=report.count(CellStatus.FILLED),
+        empty=report.count(CellStatus.EMPTY),
+        failed=report.count(CellStatus.FAILED),
+        skipped=report.count(CellStatus.SKIPPED),
+        stopped=report.stopped,
+    )
+
+
+def _echo_cell(outcome: CellOutcome) -> None:
+    """One line per crawled instrument-session, on stderr as it happens.
+
+    stderr because stdout carries only the bars written, so a crawl can be
+    watched and still be piped.
+    """
+    line = f"{outcome.status.value:<8} {outcome.symbol!s:<12} {outcome.session_date}"
+    if outcome.status is CellStatus.FILLED:
+        line += f"  {outcome.written} bars"
+    elif outcome.error is not None:
+        line += f"  {outcome.error}"
+    typer.echo(line, err=True)
+
+
+# ── Seed data (§12.1 stage 2) ────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _SeedJob:
+    """One vendor's snapshot, resolved from disk and ready to crawl."""
+
+    source: SeedSource  # which vendor served the files
+    folder: Path  # the dated snapshot folder holding them
+    files: Mapping[Symbol, Path]  # instrument to the vendor file with its rows
+    manifest: tuple[VendorFile, ...]  # provenance of every file in the folder
+
+
+def _wanted_sources(source: SeedSource | None) -> tuple[SeedSource, ...]:
+    """The vendors a command should act on: one, or every one there is."""
+    return (source,) if source is not None else tuple(SeedSource)
+
+
+def _seed_feed(job: _SeedJob, clock: LiveClock) -> FirstRateFeed | KibotFeed:
+    """The `MarketDataPort` that reads this vendor's file format.
+
+    Raises:
+        FeedError: If the vendor has no feed. Adding a vendor to `SeedSource`
+            without a parser for it would otherwise be read with another
+            vendor's format, and land wrong prices in the corpus.
+    """
+    if job.source is SeedSource.FIRSTRATE:
+        return FirstRateFeed(job.files, clock)
+    if job.source is SeedSource.KIBOT:
+        return KibotFeed(job.files, clock)
+    raise FeedError(f"no feed implementation for {job.source.value}")
+
+
+def _check_fetched(
+    vendor: SeedSource, entries: tuple[SeedEntry, ...], paths: tuple[Path, ...]
+) -> None:
+    """Fail if a download did not produce every file the config names.
+
+    `seed ingest` finds a file by the `file:` name in `seed_sources.yaml`,
+    while the FirstRateData downloader derives the name from the ticker.
+    Comparing the two here turns a config that has drifted from the vendor's
+    naming into a failed fetch, rather than into an ingest that silently finds
+    nothing to read.
+
+    Raises:
+        FeedError: If any configured file name is missing from `paths`.
+    """
+    produced = {path.name for path in paths}
+    missing = sorted({entry.file for entry in entries} - produced)
+    if missing:
+        raise FeedError(
+            f"{vendor.value}: fetched {sorted(produced)}, "
+            f"but {_DEFAULT_SEED_SOURCES.name} names {missing}"
+        )
+
+
+@seed_app.command("fetch")
+def seed_fetch(
+    ctx: typer.Context,
+    source: Annotated[
+        SeedSource | None,
+        typer.Option("--source", help="Fetch one vendor. Every vendor when omitted."),
+    ] = None,
+    sources_file: Annotated[
+        Path, typer.Option("--sources", help="Seed sources file naming the vendor files.")
+    ] = _DEFAULT_SEED_SOURCES,
+) -> None:
+    """Download the free vendor samples (§12.1 stage 2), into a dated folder.
+
+    Both vendors serve plain HTTPS with no login, so this needs no manual
+    step. Files land in `<raw_dir>/vendor/<source>/<today>/` beside a
+    `manifest.json` recording each one's url, sha256, size and adjustment
+    basis, and **nothing already written is ever overwritten**: Kibot's sample
+    is a rolling three-month window, so a second fetch is new data rather than
+    a retry, and clobbering the old one would destroy the only copy of those
+    rows. A fetch that would overwrite fails instead.
+
+    Neither licence permits redistribution, which is why `data/` is
+    gitignored and nothing fetched here is committed.
+
+    Exits 2 on a bad sources file, 1 if a download fails or Kibot's page no
+    longer links a file the config names.
+
+    Example:
+        $ neurotrade seed fetch
+        $ neurotrade seed fetch --source kibot
+    """
+    app_context: AppContext = ctx.obj
+    clock = LiveClock()
+    raw_dir = app_context.settings.storage.raw_dir
+
+    try:
+        sources = SeedSourcesFile(sources_file)
+    except (FileNotFoundError, InvalidSeedSourcesFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    written: list[Path] = []
+    try:
+        for vendor in _wanted_sources(source):
+            entries = sources.entries(vendor)
+            if not entries:
+                continue
+            if vendor is SeedSource.FIRSTRATE:
+                # FRD's URL is a documented function of the ticker; the
+                # downloader builds both from it.
+                paths = fetch_firstrate_samples(
+                    [entry.symbol.ticker for entry in entries], raw_dir=raw_dir, clock=clock
+                )
+            else:
+                # Kibot's links are opaque codes, so its files are asked for
+                # by the name the response's header will carry.
+                paths = fetch_kibot_samples(
+                    [entry.file for entry in entries], raw_dir=raw_dir, clock=clock
+                )
+            _check_fetched(vendor, entries, paths)
+            for path in paths:
+                typer.echo(f"fetched  {path}", err=True)
+            written.extend(paths)
+    except FeedError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+    typer.echo(len(written))
+
+
+@seed_app.command("ingest")
+def seed_ingest(
+    ctx: typer.Context,
+    source: Annotated[
+        SeedSource | None,
+        typer.Option("--source", help="Ingest one vendor. Every vendor when omitted."),
+    ] = None,
+    sources_file: Annotated[
+        Path, typer.Option("--sources", help="Seed sources file naming the vendor files.")
+    ] = _DEFAULT_SEED_SOURCES,
+    snapshot: Annotated[
+        datetime | None,
+        typer.Option(
+            "--snapshot",
+            help="Ingest this dated snapshot instead of the newest, as YYYY-MM-DD.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", min=1, help="Most instrument-sessions to offer.")
+    ] = None,
+) -> None:
+    """Normalise a fetched snapshot into the corpus, one root per vendor.
+
+    Runs the **same crawler the IBKR backfill runs** — the vendor files enter
+    through `MarketDataPort`, so the calendar trim, the resumability and the
+    outcome report are shared rather than reimplemented (§3.6: one
+    implementation, or research and live drift). Bars land under
+    `<derived_dir>/seed/<source>/`, never in the IBKR root: the catalog counts
+    bars without looking at provenance, so a sample bar there would both mark
+    that session complete for the backfill and outrank IBKR's own bar for the
+    same minute.
+
+    **The range comes from the files**, not from a flag: each vendor's window
+    is a fact about the sample — FirstRateData's is fixed, Kibot's rolls — and
+    a range typed in by hand is wrong the moment it moves.
+
+    Re-running is safe and cheap: the crawler plans from what the corpus
+    already holds, so a second run over the same snapshot writes nothing.
+
+    Exits 2 on a bad sources file or a snapshot that was never fetched, 1 if a
+    file will not parse or a pass gives up.
+
+    Example:
+        $ neurotrade seed ingest
+        $ neurotrade seed ingest --source firstrate --snapshot 2026-09-15
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+    raw_dir = settings.storage.raw_dir
+    seed_root = settings.storage.derived_dir / "seed"
+
+    try:
+        sources = SeedSourcesFile(sources_file)
+    except (FileNotFoundError, InvalidSeedSourcesFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    jobs: list[_SeedJob] = []
+    for vendor in _wanted_sources(source):
+        entries = sources.entries(vendor)
+        if not entries:
+            continue
+        folder = _resolve_snapshot(raw_dir, vendor, snapshot)
+        try:
+            manifest = read_manifest(folder)
+        except FeedError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1) from error
+        files: dict[Symbol, Path] = {}
+        for entry in entries:
+            path = folder / entry.file
+            if path.is_file():
+                files[entry.symbol] = path
+            else:
+                # A partial snapshot is still worth ingesting — say what is
+                # missing and take the rest.
+                typer.echo(f"absent   {vendor.value:<10} {entry.file}", err=True)
+        if not files:
+            typer.echo(f"no {vendor.value} files in {folder}", err=True)
+            raise typer.Exit(code=1)
+        jobs.append(_SeedJob(source=vendor, folder=folder, files=files, manifest=manifest))
+
+    if not jobs:
+        typer.echo(f"{sources_file} names no sources to ingest", err=True)
+        raise typer.Exit(code=2)
+
+    # One calendar across every vendor: building it is the expensive part.
+    calendar = VenueCalendar()
+
+    async def run() -> list[tuple[_SeedJob, CrawlReport]]:
+        results: list[tuple[_SeedJob, CrawlReport]] = []
+        for job in jobs:
+            feed = _seed_feed(job, clock)
+            span = feed.coverage()
+            if span is None:
+                raise FeedError(f"{job.source.value}: no bars in {job.folder}")
+            root = seed_root / job.source.value
+            report = await crawl(
+                Universe(job.files.keys()),
+                calendar,
+                DuckDBCatalog(root),
+                feed,
+                ParquetStore(root, clock),
+                start=span[0],
+                end=span[1],
+                source=_SEED_PROVENANCE[job.source].value,
+                interval=BarInterval.MIN_1,
+                limit=limit,
+                on_outcome=_echo_cell,
+            )
+            _log_seed_ingest(job, report, span)
+            results.append((job, report))
+        return results
+
+    try:
+        results = asyncio.run(run())
+    except FeedError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+    for job, report in results:
+        typer.echo(f"{job.source.value:<10} {report.bars_written} bars <- {job.folder}", err=True)
+    typer.echo(f"corpus    {seed_root}", err=True)
+    stopped = [job.source.value for job, report in results if not report.completed]
+    if stopped:
+        typer.echo(f"stopped   {', '.join(stopped)}", err=True)
+    typer.echo(sum(report.bars_written for _, report in results))
+    if stopped:
+        raise typer.Exit(code=1)
+
+
+def _resolve_snapshot(raw_dir: Path, vendor: SeedSource, snapshot: datetime | None) -> Path:
+    """Which dated folder to ingest for one vendor.
+
+    Args:
+        raw_dir: The corpus's raw root.
+        vendor: Whose snapshot to find.
+        snapshot: A specific day, or None for the newest fetched.
+
+    Returns:
+        An existing snapshot folder.
+
+    Raises:
+        typer.Exit: Code 2 if the named day was never fetched, or nothing has
+            been fetched for this vendor at all.
+    """
+    if snapshot is not None:
+        folder = raw_dir / "vendor" / vendor.value / snapshot.date().isoformat()
+        if not folder.is_dir():
+            typer.echo(f"no {vendor.value} snapshot at {folder}", err=True)
+            raise typer.Exit(code=2)
+        return folder
+    found = latest_snapshot(raw_dir, vendor.value)
+    if found is None:
+        typer.echo(
+            f"nothing fetched for {vendor.value} under {raw_dir / 'vendor'} — "
+            f"run `neurotrade seed fetch --source {vendor.value}`",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return found
+
+
+def _log_seed_ingest(job: _SeedJob, report: CrawlReport, span: tuple[date, date]) -> None:
+    """Record one vendor's ingest, with the digests of the bytes it read.
+
+    The sha256 of every file goes on the line because a vendor sample is not
+    reproducible: Kibot's window rolls, so "which rows were these" can only be
+    answered by the digest of the file they were parsed from. `adjusted` is
+    there because FirstRateData's basis is still unverified, and a later
+    adjustment check needs to know which rows it applies to.
+    """
+    log.info(
+        "seed_ingest_complete",
+        source=job.source.value,
+        snapshot=job.folder.name,
+        files={record.name: record.sha256 for record in job.manifest},
+        adjusted=sorted({record.adjusted for record in job.manifest}),
+        universe_digest=Universe(job.files.keys()).digest,
+        start=str(span[0]),
+        end=str(span[1]),
         planned=report.planned,
         requests=report.requests,
         bars_written=report.bars_written,

@@ -12,7 +12,13 @@ from pathlib import Path
 import pytest
 
 from neurotrade.adapters.feeds.errors import FeedError
-from neurotrade.adapters.feeds.vendor_download import fetch_firstrate_samples, fetch_kibot_samples
+from neurotrade.adapters.feeds.vendor_download import (
+    fetch_firstrate_samples,
+    fetch_kibot_samples,
+    latest_snapshot,
+    read_manifest,
+    snapshots,
+)
 from neurotrade.core.clock import SimClock
 from tests.adapters.feeds.conftest import FakeOpener, FakeResponse
 
@@ -151,3 +157,136 @@ def test_kibot_raises_loudly_when_a_wanted_file_matches_no_link(tmp_path: Path) 
             clock=SimClock(_JAN_1_2023_NS),
             opener=opener,
         )
+
+
+# ── Reading a snapshot back ─────────────────────────────────────
+
+
+def _snapshot(tmp_path: Path, source: str, day: str) -> Path:
+    folder = tmp_path / "vendor" / source / day
+    folder.mkdir(parents=True)
+    return folder
+
+
+def test_snapshots_are_returned_oldest_first(tmp_path: Path) -> None:
+    for day in ("2026-09-13", "2026-08-02", "2026-09-02"):
+        _snapshot(tmp_path, "kibot", day)
+    assert [path.name for path in snapshots(tmp_path, "kibot")] == [
+        "2026-08-02",
+        "2026-09-02",
+        "2026-09-13",
+    ]
+
+
+def test_snapshots_ignore_anything_not_named_as_a_date(tmp_path: Path) -> None:
+    """A stray file or a scratch folder is not a reason to refuse to ingest."""
+    _snapshot(tmp_path, "kibot", "2026-09-13")
+    _snapshot(tmp_path, "kibot", "scratch")
+    (tmp_path / "vendor" / "kibot" / "notes.txt").touch()
+    assert [path.name for path in snapshots(tmp_path, "kibot")] == ["2026-09-13"]
+
+
+def test_snapshots_of_a_vendor_never_fetched_is_empty(tmp_path: Path) -> None:
+    assert snapshots(tmp_path, "firstrate") == ()
+
+
+def test_latest_snapshot_is_the_newest_day(tmp_path: Path) -> None:
+    for day in ("2026-09-02", "2026-09-13"):
+        _snapshot(tmp_path, "kibot", day)
+    folder = latest_snapshot(tmp_path, "kibot")
+    assert folder is not None
+    assert folder.name == "2026-09-13"
+
+
+def test_latest_snapshot_is_none_when_nothing_was_fetched(tmp_path: Path) -> None:
+    assert latest_snapshot(tmp_path, "kibot") is None
+
+
+def test_a_fetch_writes_a_manifest_that_reads_back(tmp_path: Path) -> None:
+    """The round trip that matters: what `seed ingest` reads is what
+    `seed fetch` wrote, field for field."""
+    opener = FakeOpener({_FRD_AAPL_URL: FakeResponse(b"zip-bytes")})
+    written = fetch_firstrate_samples(
+        ["AAPL"], raw_dir=tmp_path, clock=SimClock(_JAN_1_2023_NS), opener=opener
+    )
+    records = read_manifest(written[0].parent)
+    assert len(records) == 1
+    record = records[0]
+    assert record.name == "AAPL_1min_sample_firstratedata.zip"
+    assert record.url == _FRD_AAPL_URL
+    assert record.sha256 == hashlib.sha256(b"zip-bytes").hexdigest()
+    assert record.size_bytes == len(b"zip-bytes")
+    assert record.fetched_at == _JAN_1_2023_NS
+    assert record.adjusted == "unknown"
+
+
+def test_read_manifest_sorts_records_by_name(tmp_path: Path) -> None:
+    opener = FakeOpener(
+        {
+            _FRD_AAPL_URL: FakeResponse(b"aapl"),
+            _FRD_AAPL_URL.replace("AAPL", "MSFT"): FakeResponse(b"msft"),
+        }
+    )
+    fetch_firstrate_samples(
+        ["MSFT", "AAPL"], raw_dir=tmp_path, clock=SimClock(_JAN_1_2023_NS), opener=opener
+    )
+    records = read_manifest(latest_snapshot(tmp_path, "firstrate") or tmp_path)
+    assert [record.name for record in records] == [
+        "AAPL_1min_sample_firstratedata.zip",
+        "MSFT_1min_sample_firstratedata.zip",
+    ]
+
+
+def test_read_manifest_rejects_a_snapshot_with_no_manifest(tmp_path: Path) -> None:
+    """A snapshot with no manifest has no provenance, and rows from it could
+    not be explained afterwards."""
+    folder = _snapshot(tmp_path, "kibot", "2026-09-13")
+    with pytest.raises(FeedError, match=r"no manifest\.json"):
+        read_manifest(folder)
+
+
+def test_read_manifest_rejects_an_unparseable_manifest(tmp_path: Path) -> None:
+    folder = _snapshot(tmp_path, "kibot", "2026-09-13")
+    (folder / "manifest.json").write_text("{not json")
+    with pytest.raises(FeedError, match="does not parse"):
+        read_manifest(folder)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("[]", id="a list, not an object"),
+        pytest.param('"text"', id="a bare string"),
+    ],
+)
+def test_read_manifest_rejects_a_manifest_that_is_not_keyed_by_name(
+    tmp_path: Path, payload: str
+) -> None:
+    folder = _snapshot(tmp_path, "kibot", "2026-09-13")
+    (folder / "manifest.json").write_text(payload)
+    with pytest.raises(FeedError, match="keyed by file name"):
+        read_manifest(folder)
+
+
+def test_read_manifest_rejects_an_entry_that_is_not_an_object(tmp_path: Path) -> None:
+    folder = _snapshot(tmp_path, "kibot", "2026-09-13")
+    (folder / "manifest.json").write_text(json.dumps({"IBM_unadjusted.txt": "nope"}))
+    with pytest.raises(FeedError, match="is not an object"):
+        read_manifest(folder)
+
+
+@pytest.mark.parametrize("dropped", ["name", "url", "sha256", "bytes", "fetched_at", "adjusted"])
+def test_read_manifest_rejects_an_entry_missing_any_field(tmp_path: Path, dropped: str) -> None:
+    folder = _snapshot(tmp_path, "kibot", "2026-09-13")
+    record = {
+        "name": "IBM_unadjusted.txt",
+        "url": "https://api.kibot.com/?get=x",
+        "sha256": "ab",
+        "bytes": 2,
+        "fetched_at": 0,
+        "adjusted": "unadjusted",
+    }
+    del record[dropped]
+    (folder / "manifest.json").write_text(json.dumps({"IBM_unadjusted.txt": record}))
+    with pytest.raises(FeedError, match="is incomplete"):
+        read_manifest(folder)

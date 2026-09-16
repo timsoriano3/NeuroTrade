@@ -108,6 +108,23 @@ fail loudly rather than silently seeding an empty corpus.
 IBM's first open on 2026-06-15 is 272.00 unadjusted against 270.06 adjusted. Raw must stay raw:
 take the `_unadjusted` files, since adjustment is the stage 5 quality gate's job.
 
+**Dating a bar by its UTC close puts it on the wrong day.** A 19:59 ET bar closes at 00:59 UTC the
+*next* day, so deriving a file's session range from `ts_event` stretches it a day past what the
+file holds and makes `seed ingest` crawl a session with no rows. `covered_dates` undoes the
+open→close shift first and takes the **ET open's** date.
+
+**FRD's sample has absent no-trade minutes, and not evenly.** After a full live ingest the six
+NASDAQ names were 251/251 complete sessions, while DIA was 141/251 and VXX 124/251 — short by one
+or two bars on the rest. Nothing is wrong with the ingest: the files have no row for a minute that
+did not trade. A Phase 1 completeness gate must not read a short seed session as a failed fetch.
+
+**`seed fetch` dates its folder in UTC.** A fetch run late on the 15th local lands in
+`2026-09-16/`. Intended — `Clock` is UTC everywhere — but `--snapshot` takes the folder's name,
+not the local day it felt like.
+
+**RUF043 again (fifth time): `pytest.raises(match=...)` is a regex.** `match="no manifest.json"`
+fails the build over the unescaped `.`. Use a raw string with the dot escaped.
+
 ## Logging
 
 **structlog caches its logger factory on first use.**

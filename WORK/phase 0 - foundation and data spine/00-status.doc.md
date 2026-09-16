@@ -51,9 +51,10 @@ Spec order is §12.1's corpus-build table. Stages 1–3 are Phase 0; stage 5 is 
   IBKR's data-farm outage — first as a hang with no timeout, then (after adding
   `request_timeout_seconds`, see `08-gotchas.doc.md`) as a clean per-cell failure — see
   `10-backfill-crawler.doc.md`. What is left is a weekday crawl with the farms up.
-- **Free sample seed data** (§12.1 stage 2) — the feeds exist and read both vendors'
-  files (`12-seed-feeds.doc.md`); missing are the `seed fetch` / `seed ingest` commands, so
-  nothing is in the corpus yet.
+- ~~**Free sample seed data** (§12.1 stage 2)~~ — **done.** `make seed` fetches both vendors and
+  ingests them through the same crawler; 1,019,421 bars are in `derived/seed/` as of 2026-09-15.
+  FRD's adjustment basis is still `unknown` (needs stage 3's yfinance) and the Kibot-vs-IBKR
+  overlap check waits on a weekday IBKR crawl. See `12-seed-feeds.doc.md`.
 - **yfinance daily bars and universe history** (§12.1 stage 3) — including `.TO` tickers.
 
 Corpus target before Phase 5: 3–5 years of 1-minute bars across US + TSX, ~2,000 symbols,
@@ -67,4 +68,5 @@ model, no trial ledger, no risk engine, no execution engine, no `api/`, no `ui/`
 
 ## The one-line summary for a new session
 
-The skeleton and both proofs are done; there is no data in it and nothing trades yet.
+The skeleton and both proofs are done; the corpus holds a million vendor-sample bars, nothing from
+IBKR yet, and nothing trades.

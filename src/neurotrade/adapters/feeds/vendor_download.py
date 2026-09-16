@@ -32,20 +32,26 @@ import ssl
 import tempfile
 import urllib.request
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Protocol
 
 import certifi
 
 from neurotrade.adapters.feeds.errors import FeedError
-from neurotrade.core.clock import Clock
+from neurotrade.core.clock import Clock, Nanos
 
 __all__ = [
     "HttpOpener",
     "HttpResponse",
     "UrllibOpener",
+    "VendorFile",
     "fetch_firstrate_samples",
     "fetch_kibot_samples",
+    "latest_snapshot",
+    "read_manifest",
+    "snapshots",
 ]
 
 _USER_AGENT = "NeuroTrade-seed-fetch/0.0 (+https://github.com/petersoriano/NeuroTrade)"
@@ -272,6 +278,141 @@ def fetch_kibot_samples(
         missing = ", ".join(sorted(remaining))
         raise FeedError(f"kibot page had no link for: {missing}")
     return tuple(written)
+
+
+# ── Reading a snapshot back ──────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class VendorFile:
+    """One file's manifest record, as `seed ingest` reads it back.
+
+    The provenance a bar's `source` column cannot carry: which URL served the
+    bytes, their digest, and whether prices are adjusted. §12.1 requires every
+    stored row to be explainable, and for a vendor sample the explanation is
+    the snapshot it came out of.
+    """
+
+    name: str  # file name inside the snapshot folder
+    url: str  # where the bytes were fetched from
+    sha256: str  # hex digest of the bytes as fetched
+    size_bytes: int  # bytes as fetched, named `bytes` in the JSON
+    fetched_at: Nanos  # epoch nanoseconds, from the fetching clock
+    adjusted: str  # "unadjusted" (Kibot) or "unknown" (FRD) — see decision 7
+
+
+def snapshots(raw_dir: Path, source: str) -> tuple[Path, ...]:
+    """Every dated snapshot folder for one vendor, oldest first.
+
+    Args:
+        raw_dir: The corpus's raw root (`StorageSettings.raw_dir`).
+        source: Vendor name, as `SeedSource` spells it.
+
+    Returns:
+        Folders under `<raw_dir>/vendor/<source>/` whose name is an ISO date,
+        ascending. Empty if the vendor has never been fetched. Anything else
+        in there is ignored rather than failing: a stray file or a scratch
+        folder someone left is not a reason to refuse to ingest.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as directory:
+        ...     root = Path(directory)
+        ...     (root / "vendor" / "kibot" / "2026-09-11").mkdir(parents=True)
+        ...     (root / "vendor" / "kibot" / "notes.txt").touch()
+        ...     [path.name for path in snapshots(root, "kibot")]
+        ['2026-09-11']
+    """
+    folder = raw_dir / "vendor" / source
+    if not folder.is_dir():
+        return ()
+    dated: list[Path] = []
+    for child in folder.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            date.fromisoformat(child.name)
+        except ValueError:
+            continue
+        dated.append(child)
+    # ISO dates sort lexically, but sort on the parsed date anyway: the day a
+    # folder names is the ordering that matters, not how it is spelled.
+    return tuple(sorted(dated, key=lambda path: date.fromisoformat(path.name)))
+
+
+def latest_snapshot(raw_dir: Path, source: str) -> Path | None:
+    """The most recent snapshot folder for one vendor, or None if never fetched.
+
+    The default for `seed ingest`: Kibot's window rolls, so the newest
+    snapshot is the one holding the most recent sessions. Older folders stay
+    on disk and can still be ingested by naming them.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as directory:
+        ...     latest_snapshot(Path(directory), "firstrate") is None
+        True
+    """
+    found = snapshots(raw_dir, source)
+    return found[-1] if found else None
+
+
+def read_manifest(folder: Path) -> tuple[VendorFile, ...]:
+    """Read a snapshot's `manifest.json`, by file name.
+
+    Args:
+        folder: A dated snapshot folder.
+
+    Returns:
+        One record per file the manifest describes, sorted by name.
+
+    Raises:
+        FeedError: If the manifest is missing, unparseable, or a record is
+            missing a field. A snapshot without a manifest has no provenance,
+            and ingesting it would put unexplainable rows in the corpus.
+
+    Example:
+        >>> import json, tempfile
+        >>> with tempfile.TemporaryDirectory() as directory:
+        ...     folder = Path(directory)
+        ...     record = {
+        ...         "name": "IBM_unadjusted.txt", "url": "https://api.kibot.com/?get=x",
+        ...         "sha256": "ab", "bytes": 2, "fetched_at": 0, "adjusted": "unadjusted",
+        ...     }
+        ...     _ = (folder / "manifest.json").write_text(json.dumps({record["name"]: record}))
+        ...     [entry.adjusted for entry in read_manifest(folder)]
+        ['unadjusted']
+    """
+    path = folder / "manifest.json"
+    if not path.is_file():
+        raise FeedError(f"no manifest.json in {folder}")
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise FeedError(f"{path} does not parse: {error}") from error
+    if not isinstance(raw, dict):
+        raise FeedError(f"{path} should hold an object keyed by file name")
+    records: list[VendorFile] = []
+    for key, value in sorted(raw.items()):
+        if not isinstance(value, dict):
+            raise FeedError(f"{path}: entry {key!r} is not an object")
+        try:
+            records.append(
+                VendorFile(
+                    name=str(value["name"]),
+                    url=str(value["url"]),
+                    sha256=str(value["sha256"]),
+                    size_bytes=int(value["bytes"]),
+                    fetched_at=int(value["fetched_at"]),
+                    adjusted=str(value["adjusted"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise FeedError(f"{path}: entry {key!r} is incomplete: {error}") from error
+    return tuple(records)
+
+
+# ── Internals ────────────────────────────────────────────────
 
 
 def _filename_from_content_disposition(header: str | None) -> str | None:

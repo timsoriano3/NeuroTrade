@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill docs-check \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -115,6 +115,20 @@ backfill: ## Fill the corpus from IBKR. START=YYYY-MM-DD [END= LIMIT= PASSES=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
 	$(PY) neurotrade --profile $(PROFILE) ibkr backfill --start $(START) \
 	  $(if $(END),--end $(END)) $(if $(LIMIT),--limit $(LIMIT)) $(if $(PASSES),--passes $(PASSES))
+
+# Free vendor samples (§12.1 stage 2). `seed` does both halves; they are also
+# separate targets because a fetch is a one-shot download that REFUSES to
+# overwrite a snapshot already taken today, while an ingest is idempotent and
+# worth re-running. SOURCE limits either to one vendor; SNAPSHOT ingests an
+# older dated folder instead of the newest.
+seed: seed-fetch seed-ingest ## Seed the corpus from free vendor samples. [SOURCE=]
+
+seed-fetch: ## Download the vendor samples into a dated raw snapshot. [SOURCE=firstrate|kibot]
+	$(PY) neurotrade --profile $(PROFILE) seed fetch $(if $(SOURCE),--source $(SOURCE))
+
+seed-ingest: ## Normalise a fetched snapshot into derived/seed. [SOURCE= SNAPSHOT=YYYY-MM-DD]
+	$(PY) neurotrade --profile $(PROFILE) seed ingest $(if $(SOURCE),--source $(SOURCE)) \
+	  $(if $(SNAPSHOT),--snapshot $(SNAPSHOT))
 
 replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
 	@if [ -n "$(SESSION)" ]; then \

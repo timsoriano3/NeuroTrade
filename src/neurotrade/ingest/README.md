@@ -12,14 +12,20 @@ from live market data. This package is that plan.
 | `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work |
 | `crawler.py` | `crawl` — one pass: plan, fetch each missing session from the feed, write it to the store. `CrawlReport` says what the pass did |
 
-Wired to real adapters — IBKR feed, Parquet store, DuckDB catalog, venue
-calendar, universe file — by `neurotrade ibkr backfill` in `cli.py`, which is
-the only place those concretes meet this package:
+Wired to real adapters — Parquet store, DuckDB catalog, venue calendar,
+universe file, and a feed — in `cli.py`, which is the only place those
+concretes meet this package. **Two commands drive the same crawl**, differing
+only in which feed and which dataset root they hand it:
 
 ```bash
-make backfill START=2026-08-01             # END defaults to yesterday, UTC
+make backfill START=2026-08-01             # IBKR history -> raw/bars
 make backfill START=2026-08-01 LIMIT=50 PASSES=3
+make seed                                  # vendor samples -> derived/seed/<source>
 ```
+
+That the seed feeds reuse this crawler rather than parsing into the corpus
+themselves is the point: one calendar trim, one resumability rule, one outcome
+report, whatever the data's origin (§3.6).
 
 ## Why it depends on core alone
 
