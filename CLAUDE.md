@@ -27,18 +27,18 @@ reading ~40 lines instead of 15k lines of source.
 **Open only the doc the task needs.** `08-gotchas.doc.md` in each phase folder is the highest value
 per token in the repo — the list of bugs already paid for, and cheaper to read than to rediscover.
 
-`TRADER_PLAN.md` is the spec and is large. **Never read it whole.** Use the `plan-section` agent,
-or `grep -n` for the heading and `sed -n 'A,Bp'` that range.
+`TRADER_PLAN.md` is the spec and is large. **Never read it whole.** `grep -n` for the heading and
+`sed -n 'A,Bp'` that range — see Working procedures.
 
 ### Checkpointing and clearing
 
 **Journalling is part of every commit — do not ask.** Once a commit's work passes its gate and
 audits, run the `work-journal` skill *before* the commit handoff, so the WORK/ update lands in the
 same commit as the code it describes. Do it while the session still holds the decisions; after a
-clear, the brief has to be reconstructed. The skill dispatches the sonnet `work-journal` agent so
-the doc is not written at the session's peak context. Pick the doc path yourself — rewrite the
-existing subsystem doc, or name a new `WORK/phase <#> - <title>/<subtitle>.doc.md` — and state it
-in the handoff.
+clear, the brief has to be reconstructed. Journalling happens at the session's peak context, so
+write from git and slices rather than re-reading source you no longer hold. Pick the doc path
+yourself — rewrite the existing subsystem doc, or name a new
+`WORK/phase <#> - <title>/<subtitle>.doc.md` — and state it in the handoff.
 
 **One commit per window, then clear.** A compaction resets the floor and the window regrows from
 there; clearing after a checkpoint does not. Two hooks raise this mechanically — one at turn end on work
@@ -131,72 +131,124 @@ These change how code must be written. Violating one is a defect even if tests p
 
 ## Working agreements
 
-### Delegation, batching and model tiers
+### Working procedures — everything runs in the main thread
 
-Agent use is **authorised standing policy for this project**. Do not wait to be told again. The
-measurements behind these rules are in `WORK/cost-and-delegation.doc.md`; the short version is that
-cost is `context size × number of requests`, every tool call is a request, and a subagent's context
-is discarded so delegation *compresses*.
+**No subagents.** The `Agent` tool is not used in this project: a fresh agent re-derives context
+this session already holds, and the measured effect was more spend, not less. The procedures below
+carry the logic the retired agents held; run them yourself.
 
-#### Hard triggers — delegate, do not read
+Cost is still `context size × number of requests`, so the goal each procedure serves is the same:
+read little, keep long output out of the window.
 
-| Trigger | Agent | Model |
-|---|---|---|
-| Any question about what the spec says | `plan-section` | haiku |
-| Any sweep for where code lives or what its surface is | `codebase-locator` | haiku |
-| Any test suite, lint or full build gate | `check-runner` | haiku |
-| Any question about how a library/SDK actually works | `library-researcher` | sonnet |
-| Writing tests for a module | `test-author` | sonnet |
-| Auditing a diff against the invariants above | `invariant-auditor` | sonnet |
-| Auditing a diff for documentation that went false | `docs-drift-auditor` | sonnet |
-| Reviewing validation methodology or statistics | `quant-methodology-reviewer` | **opus** |
-| Writing a `WORK/` doc | `work-journal` (via skill) | sonnet |
-| Writing a commit handoff | `commit-handoff` (via skill) | sonnet |
+#### Keep tool output out of context
 
-**Never read `TRADER_PLAN.md` inline.** Use `plan-section`.
+- **Locate, then slice.** `grep -n` to find, `sed -n 'A,Bp'` to read. Never read a whole file to
+  answer "where is X" or "what does the spec say". Read a file whole only when you will edit most
+  of it.
+- **Long-output commands go to a log file, never to the window:**
+  ```bash
+  make check > "$TMPDIR/gate.log" 2>&1; echo "exit=$?"
+  grep -nE 'FAIL|failed|error:|Error' "$TMPDIR/gate.log" | head -20   # only on failure
+  ```
+  Same for a full `pytest` run. Passing output is noise; failing output is long. Report the
+  outcome and the actionable lines, never the transcript.
+- **Batch.** Independent tool calls go in one message; N sequential calls are N full-context
+  requests. Sequence only when a later call needs an earlier result.
 
-**Never run `make check` (or `pytest` over a directory) inline.** Passing output is noise, failing
-output is long, and both land in context permanently. Use `check-runner`.
+#### Reading the spec
 
-Run `invariant-auditor` and `docs-drift-auditor` before writing a commit handoff. They catch the two
-defect classes `make check` structurally cannot: a violated invariant passes tests, and a false
-sentence passes `docs-check`.
+`TRADER_PLAN.md` is large and gitignored. **Never read it whole.**
 
-Keep it inline when the answer is in a file already open, or when delegating would cost more
-round-trips than it saves. Don't delegate trivia. Don't answer the same question twice — an agent
-*and* an inline probe is one of them wasted.
+```bash
+grep -nE '^#{1,4} ' TRADER_PLAN.md     # table of contents
+grep -n -i '<topic>' TRADER_PLAN.md    # candidates
+sed -n '<start>,<end>p' TRADER_PLAN.md # the section only
+```
 
-#### Batching
+Quote the section verbatim with its line range; say `spec is silent on this` rather than filling
+a gap. Stable anchors: §3.6 one shared feature implementation, §10.1 profiles, §12.1 corpus build,
+§13 phased roadmap, §18 repo strategy.
 
-**Independent tool calls go in one message.** N sequential calls are N full-context requests; the
-same N issued together are one. Before making a call, ask what else could be answered in the same
-breath. Sequencing is only justified when a later call needs an earlier result.
+#### Researching a library
 
-#### Model tiers
+1. **context7 first** (`resolve-library-id`, then `query-docs`) — model recall is stale by
+   definition. Web search only when context7 has no answer.
+2. **Check the package is still the maintained one.** Renames and successor packages are the most
+   common source of confidently wrong answers (`ib_insync` → `ib_async`).
+3. **Verify against the installed version:** `uv pip show <pkg> | head -3`, and read the source in
+   `.venv` when the docs are ambiguous — that is how the `reqHistoricalDataAsync` timeout
+   behaviour was settled.
+4. Say **unverified** rather than stating a plausible signature.
 
-| Tier | For |
-|---|---|
-| haiku | mechanical, high-input/low-output, no judgement |
-| sonnet | bounded judgement against a clear rubric |
-| opus | reasoning where being wrong is expensive and silent |
+#### Writing tests
 
-**The main loop is a tier choice too, and it dominates the bill.**
+- **Heavier on rejection than on happy paths.** Section comments (`# ── Price ───`) group a file;
+  `pytest.mark.parametrize` for families of bad input.
+- **`pytest.raises(match=...)` takes a REGEX** — escape `(`, `)`, `.`, `$` or ruff RUF043 fails
+  the build. Hit four times.
+- `typing.assert_type` for type-level guarantees, never an `isinstance` assertion mypy can prove.
+- Doctests in `src/` run as tests. Any `>>>` output must be **executed, not predicted** — likewise
+  any hash, digest or count.
+- `filterwarnings = ["error"]`: a warning fails the suite; fix the leak.
+- IBKR tests get `@pytest.mark.ibkr` and are excluded by default.
+- **Never weaken a domain invariant to make a test pass.** Three times a fixture had `close`
+  outside `high`/`low`; the validation was right every time.
+- While iterating, run **only the file you are writing** (`uv run pytest <file> -x -q | tail -30`),
+  then the full gate once at the end.
 
-- **Sonnet is the default** (user settings) — writing modules and docs, wiring config, running
-  gates, applying a plan that already exists.
+#### Auditing a diff before the handoff
+
+`make check` structurally cannot catch two defect classes, so run both passes yourself on
+`git diff HEAD` plus untracked files, before writing the commit handoff.
+
+**Invariants** — hold the diff against the Invariants section above, not against general good
+practice. Useful sweeps:
+```bash
+grep -rn 'datetime.now\|time.time()\|utcnow' src        # wall-clock leakage
+grep -rn 'float(' src/neurotrade/core src/neurotrade/features   # precision boundary
+grep -rn 'for .* in \(set(\|\.items()\)' src            # iteration-order dependence
+grep -rn 'random\.\|np.random' src | grep -v seed       # unseeded RNG
+```
+Report violations only, as `VIOLATION — "<invariant>"` with file:line and the failure it causes.
+
+**Docs drift** — read every README and `CLAUDE.md` the change set touches on and ask only: would a
+reader be **misled**? A module described in the wrong package, a contract that changed shape, a
+command documented with behaviour it no longer has, a list gone stale. Typos are not drift.
+Mechanical cases (missing file, dead link, absent make target) are `make docs-check`'s job.
+
+#### Reviewing methodology and statistics (Phase 1 onward)
+
+§17 names backtest overfitting as the project's primary risk: the failure is not a crash, it is a
+clean equity curve that does not survive live. Tests cannot catch it. Before trusting any
+validation result, hunt:
+
+- **Leakage** — any path from `t+1` into a decision at `t`. Feature windows closing after the
+  label opens, normalisation fitted on the full sample, bar timestamps taken at the open,
+  survivorship in the universe, corporate actions applied retroactively.
+- **CV that leaks through overlapping labels** — triple-barrier labels span time. Check purging
+  and embargo, and that CPCV is combinatorial rather than a renamed k-fold.
+- **Multiple testing** — every hypothesis, including every automated discovery run, inflates the
+  best observed Sharpe. Deflate (DSR, PBO) against the true search space, not the results kept.
+- **Cost modelling** — costs inside the simulation, not subtracted after; no mid fills; spread on
+  exit; slippage that scales with size and volatility; maker/taker distinguished.
+- **Regime and stationarity** — check the distribution of outcomes, not the aggregate.
+
+Say plainly when a result is not trustworthy. Being agreeable here is worse than saying nothing.
+
+#### Model choice
+
+The main loop is the whole bill now.
+
+- **Sonnet is the default** — writing modules and docs, wiring config, running gates, applying an
+  agreed plan.
 - **Opus for design, ambiguous debugging, and Phase 1 validation work** — CPCV, triple-barrier
   labelling, deflated Sharpe, PBO, the trial ledger.
-
-Switching to opus efficiently:
-
-- **Switch at the start of a window, never mid-window.** The prompt cache is per-model; a switch
-  at 300k re-writes all 300k. Suggest `/model opus` in the first reply, or `/clear` first.
-- **A bounded question does not need the main loop on opus.** Send methodology and statistics
-  questions to `quant-methodology-reviewer` and stay on sonnet.
-- **Design on opus, execute on sonnet.** Once a plan is agreed, suggest `/model sonnet` — ideally
-  after writing the plan to a file and clearing.
+- **Switch at the start of a window, never mid-window.** The prompt cache is per-model; switching
+  at 300k rewrites all 300k. Suggest `/model opus` in the first reply, or `/clear` first, and
+  `/model sonnet` once a plan is agreed.
 
 ### Session hygiene
+
 
 - **Clear at 150–250k.** `context-budget.sh` fires on every tool call and at turn end: a notice
   from 150k, a hard stop from 250k. Obey the hard stop; the 460k-median session it replaces was
@@ -207,21 +259,22 @@ Switching to opus efficiently:
 
 ### Commit workflow — plan execution
 
-Do **not** batch work into large commits, and do not commit anything yourself.
+Do **not** mix unrelated scopes in one commit, and do not commit anything yourself.
 
-1. Break the plan into a sequence of **small** commits, each logically complete on its own.
+1. Break the plan into commits **grouped by scope** (see below), each logically complete on its own.
 2. Implement **one** commit's worth of changes, then stop.
-3. Run the `work-journal` skill for this commit's work (see Checkpointing), without asking.
-4. Write the commit handoff below, covering code and WORK/ together.
-5. **Wait.** Do not begin the next commit until the user says they have committed and to proceed.
+3. Audit the diff (invariants, then docs drift) — see Working procedures.
+4. Run the `work-journal` skill for this commit's work (see Checkpointing), without asking.
+5. Write the commit handoff below, covering code and WORK/ together.
+6. **Wait.** Do not begin the next commit until the user says they have committed and to proceed.
 
 The user commits. Claude never runs `git commit` unless explicitly asked.
 
 ### Commit handoff
 
-Use the `commit-handoff` skill. It dispatches the sonnet `commit-handoff` agent, which reads git
-itself and carries the six-part format; the main loop sends only a short brief of intent and
-relays the result verbatim.
+Use the `commit-handoff` skill; it carries the six-part format. Write it from `git status --short`,
+`git diff HEAD --stat` and the hunks, plus the gate results already run this session. Never claim a
+check that was not run.
 
 ### How to group commits
 
@@ -234,7 +287,11 @@ why.
   modules for work that lands later. A package appears in the commit that puts real code in it.
 - **One language at a time.** Go and TypeScript do not arrive until Phase 3. Build tooling should be
   *structured* to accept them, but do not install or stub a language before its code exists.
-- **Prefer many small commits.** If a summary needs "and" more than once, split it.
+- **Group by scope, not by file.** One commit per coherent scope: a subsystem with its tests,
+  wiring and docs lands together. Pieces that share a scope (sibling adapters behind one port,
+  a command and its make target, a fix and the doc it invalidates) are one commit, not a
+  sequence. Split only when scopes differ — a reader should not need three commits to follow
+  one idea. Phase 0 shipped too many slivers; aim for roughly one commit per plan section.
 
 ### Documentation standard
 
