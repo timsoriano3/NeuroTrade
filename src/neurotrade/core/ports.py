@@ -38,6 +38,7 @@ from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar, BarInterval, Event
 from neurotrade.core.ids import OrderId
 from neurotrade.core.orders import Order
+from neurotrade.core.quality import Coverage, Duplicate, Gap, SuspectSession
 from neurotrade.core.types import Symbol, Venue
 from neurotrade.core.universe import Universe
 
@@ -46,6 +47,7 @@ __all__ = [
     "CalendarPort",
     "CatalogPort",
     "CorporateActionsPort",
+    "CorpusQualityPort",
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
@@ -428,6 +430,98 @@ class CorporateActionsPort(Protocol):
                 failed fetch. An empty tuple must never stand in for a failure,
                 because a missing split is indistinguishable from a name that
                 never split, and the corpus would silently lose the adjustment.
+        """
+        ...
+
+
+@runtime_checkable
+class CorpusQualityPort(Protocol):
+    """The questions §12.1 stage 5 asks of a corpus before trusting it.
+
+    Kept apart from `CatalogPort` rather than bolted onto it. The crawler needs
+    exactly one method — how many bars per session — and every fake in its tests
+    implements that and nothing else. Widening the port it depends on to carry
+    four audit queries would make each of those fakes grow methods the crawler
+    never calls, which is how a narrow interface rots. `DuckDBCatalog` satisfies
+    both, structurally, without knowing either exists.
+
+    **Answers describe, they do not judge.** A gap is a failed fetch or a
+    genuine halt and no query can tell which; a flat session is a halt or an
+    illiquid name. The caller decides what is fatal.
+
+    Example:
+        Conformance is structural — no import from this module is needed:
+
+        >>> class CleanCorpus:
+        ...     def gaps(self, symbol, session_date, interval): return ()
+        ...     def duplicate_timestamps(self, interval): return ()
+        ...     def suspect_sessions(self, interval): return ()
+        ...     def coverage(self, symbol=None, interval=None): return ()
+        >>> isinstance(CleanCorpus(), CorpusQualityPort)
+        True
+    """
+
+    def coverage(
+        self, symbol: Symbol | None = None, interval: BarInterval = BarInterval.MIN_1
+    ) -> tuple[Coverage, ...]:
+        """What is held, per instrument-session.
+
+        Args:
+            symbol: Restrict to one instrument; all of them when omitted.
+            interval: Bar size.
+
+        Returns:
+            One entry per instrument-session held.
+        """
+        ...
+
+    def gaps(
+        self,
+        symbol: Symbol,
+        session_date: date,
+        interval: BarInterval = BarInterval.MIN_1,
+    ) -> tuple[Gap, ...]:
+        """Runs of missing bars inside one session that is otherwise present.
+
+        Per session rather than per symbol: a hole is only meaningful against
+        the session that should have filled it, and asking across a multi-year
+        history would report every overnight boundary as a gap.
+
+        Args:
+            symbol: Instrument to examine.
+            session_date: The trading day to examine.
+            interval: Bar size the gap is measured against.
+
+        Returns:
+            One entry per hole, oldest first.
+        """
+        ...
+
+    def duplicate_timestamps(
+        self, interval: BarInterval = BarInterval.MIN_1
+    ) -> tuple[Duplicate, ...]:
+        """Bars sharing an instrument, interval and timestamp.
+
+        Unlike a gap, always a fault: one instant had one set of prices.
+
+        Args:
+            interval: Bar size to check.
+
+        Returns:
+            One entry per offending timestamp. Empty is the expected answer.
+        """
+        ...
+
+    def suspect_sessions(
+        self, interval: BarInterval = BarInterval.MIN_1
+    ) -> tuple[SuspectSession, ...]:
+        """Sessions present but not looking like trading — zero volume, or flat.
+
+        Args:
+            interval: Bar size to check.
+
+        Returns:
+            One entry per suspect instrument-session.
         """
         ...
 

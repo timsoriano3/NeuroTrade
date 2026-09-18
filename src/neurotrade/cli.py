@@ -74,6 +74,7 @@ from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol
 from neurotrade.core.universe import Universe, UniverseHistory
 from neurotrade.ingest.actions import fetch_actions, scan_gaps
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
+from neurotrade.ingest.quality import audit_corpus, summarise
 from neurotrade.ingest.universe_history import LiquidityFloor, ScreenRules, screen_universe
 from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
@@ -141,6 +142,9 @@ app.add_typer(universe_app, name="universe")
 
 actions_app = typer.Typer(help="Corporate actions and price adjustment.", no_args_is_help=True)
 app.add_typer(actions_app, name="actions")
+
+corpus_app = typer.Typer(help="Corpus quality gate.", no_args_is_help=True)
+app.add_typer(corpus_app, name="corpus")
 
 
 @app.callback()
@@ -1380,6 +1384,129 @@ def actions_check(
     for gap in report.gaps:
         typer.echo(str(gap), err=True)
     typer.echo(report.describe(), err=True)
+    if not report.clean:
+        raise typer.Exit(code=1)
+
+
+@corpus_app.command("check")
+def corpus_check(
+    ctx: typer.Context,
+    start: Annotated[
+        datetime,
+        typer.Option("--start", help="First session to audit.", formats=["%Y-%m-%d"]),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end",
+            help="Last session to audit. Defaults to yesterday, UTC.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    interval: Annotated[
+        str, typer.Option("--interval", help="Bar size to audit: 1m or 1d.")
+    ] = "1m",
+    source: Annotated[
+        str,
+        typer.Option(
+            "--source",
+            help="Which corpus root to audit: ibkr, yfinance-daily, firstrate, kibot.",
+        ),
+    ] = "ibkr",
+    limit: Annotated[
+        int, typer.Option("--limit", help="Findings printed per class before truncating.")
+    ] = 20,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the instruments.")
+    ] = _DEFAULT_UNIVERSE,
+) -> None:
+    """Audit the corpus for faults (§12.1 stage 5).
+
+    Six checks: sessions the calendar expects but the corpus lacks, sessions
+    held with too few bars, holes inside otherwise-present sessions, duplicate
+    prints, sessions that do not look like trading (zero volume or a flat
+    close), and a survivorship audit.
+
+    **It reports; it does not repair.** Every fault here has at least two
+    causes and the corpus cannot tell them apart — a hole is a halt or a
+    dropped request, a flat session is a halt or an illiquid name. Writing a
+    plausible number over a known unknown is worse than the hole, because the
+    hole is visible and the guess is not.
+
+    A missing-session count in the thousands is expected while the backfill is
+    still crawling; it is not a fault. Duplicates always are.
+
+    Exits 1 when anything is found, so it can gate a pipeline. Survivorship is
+    excluded from that verdict: it is a standing property of a free data source
+    rather than something a re-fetch can fix, and a permanently red gate is an
+    ignored one.
+
+    Example:
+        $ neurotrade corpus check --start 2026-09-11 --interval 1m
+        $ neurotrade corpus check --start 2021-09-15 --interval 1d --source yfinance-daily
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+
+    try:
+        bar_interval = BarInterval(interval)
+    except ValueError as error:
+        typer.echo(f"--interval {interval} is not a bar size this system knows", err=True)
+        raise typer.Exit(code=2) from error
+
+    roots = {
+        "ibkr": settings.storage.raw_dir / "bars",
+        "yfinance-daily": settings.storage.derived_dir / "daily" / Source.YFINANCE.value,
+        "firstrate": settings.storage.derived_dir / "seed" / Source.FIRSTRATE.value,
+        "kibot": settings.storage.derived_dir / "seed" / Source.KIBOT.value,
+    }
+    root = roots.get(source)
+    if root is None:
+        typer.echo(f"--source {source} is not one of {', '.join(sorted(roots))}", err=True)
+        raise typer.Exit(code=2)
+
+    first = start.date()
+    last = end.date() if end is not None else to_datetime(clock.now_ns()).date() - timedelta(days=1)
+    if last < first:
+        typer.echo(f"--end {last} is before --start {first}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    catalog = DuckDBCatalog(root)
+    report = audit_corpus(
+        universe,
+        VenueCalendar(),
+        catalog,
+        catalog,  # DuckDBCatalog satisfies both ports; see CorpusQualityPort
+        start=first,
+        end=last,
+        interval=bar_interval,
+        # Every free source in use lists only what still trades.
+        survivors_only=True,
+    )
+
+    for label, items in (
+        ("duplicate", report.duplicates),
+        ("suspect", report.suspect),
+        ("gap", report.gaps),
+        ("short", report.short_sessions),
+        ("missing", report.missing_sessions),
+    ):
+        shown, withheld = summarise(items, limit)
+        for line in shown:
+            typer.echo(f"{label}: {line}", err=True)
+        if withheld:
+            typer.echo(f"{label}: ... and {withheld} more", err=True)
+
+    if report.survivorship is not None:
+        typer.echo(report.survivorship.describe(), err=True)
+    typer.echo(report.describe())
     if not report.clean:
         raise typer.Exit(code=1)
 

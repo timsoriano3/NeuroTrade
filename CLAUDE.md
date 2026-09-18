@@ -68,6 +68,7 @@ make daily          # fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [EN
 make universe       # build point-in-time universe membership. START=YYYY-MM-DD [END=]
 make actions        # fetch splits and dividends from Yahoo. START=YYYY-MM-DD [END=]
 make actions-check  # audit the daily corpus for gaps no action explains. START=YYYY-MM-DD [END= THRESHOLD=]
+make corpus-check   # audit the corpus for faults. START=YYYY-MM-DD [END= INTERVAL= SOURCE= LIMIT=]
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`

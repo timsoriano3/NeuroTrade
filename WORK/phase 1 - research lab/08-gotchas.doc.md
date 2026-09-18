@@ -49,3 +49,15 @@ pattern fails ruff RUF043. Phase 0 recorded this four times; this commit made it
 existing import line also rewrote the identical line inside two `Example:` blocks, and `ruff
 format` then re-indented both docstrings trying to parse the result. Doctest collection caught it.
 Anchor on something unique, or pass a count.
+
+## Corpus queries
+
+**`DuckDBCatalog.gaps` is one query per instrument-session, not per symbol.** Calling it inside a
+per-session loop over five years of 43 names is ~52,000 queries against 53,879 tiny Parquet files;
+the first daily audit ran past ten minutes and was killed. It is also vacuous for daily bars — one
+bar per session has no inside — so `audit_corpus` skips it for `DAY_1` entirely. Check the arity
+of a catalog method before looping over it.
+
+**A dataclass in a report needs `__str__` or the terminal gets its `repr`.** The first real
+`corpus check` printed `(Symbol(ticker='JPM', venue=<Venue.NYSE: 'NYSE'>), datetime.date(2026, 9,
+11))` per line. Anything a command prints gets a `__str__`; anything it only counts does not.

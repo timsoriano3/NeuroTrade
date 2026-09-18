@@ -27,96 +27,22 @@ own progress reporting the first thing to break.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import duckdb
 
-from neurotrade.core.clock import Nanos
 from neurotrade.core.events import BarInterval
+from neurotrade.core.quality import Coverage, Duplicate, Gap, SuspectSession
 from neurotrade.core.types import Symbol, Venue
 
 __all__ = [
     "Coverage",
     "DuckDBCatalog",
+    "Duplicate",
     "Gap",
+    "SuspectSession",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class Coverage:
-    """What the corpus holds for one instrument-session.
-
-    Example:
-        >>> held = Coverage(
-        ...     symbol=AAPL, session_date=date(2026, 3, 14), interval=BarInterval.MIN_1,
-        ...     bar_count=390, first_ts=1_000, last_ts=2_000, sources=("ibkr",),
-        ... )
-        >>> held.is_complete(390)
-        True
-    """
-
-    symbol: Symbol  # instrument
-    session_date: date  # trading day, in the venue's terms
-    interval: BarInterval  # bar size
-    bar_count: int  # rows held for this instrument-session
-    first_ts: Nanos  # earliest ts_event held
-    last_ts: Nanos  # latest ts_event held
-    sources: tuple[str, ...]  # feeds that contributed, sorted
-
-    def is_complete(self, expected_bars: int) -> bool:
-        """Whether the session holds at least the expected number of bars.
-
-        Args:
-            expected_bars: What a full session should contain — 390 for
-                1-minute US regular hours, more if pre- and post-market are
-                included.
-
-        Returns:
-            True when nothing is missing. Deliberately `>=` rather than `==`:
-            extended-hours bars legitimately push a session past the regular
-            count, and treating that as a fault would flag every day.
-        """
-        return self.bar_count >= expected_bars
-
-    @property
-    def is_mixed_source(self) -> bool:
-        """Whether more than one feed contributed to this session.
-
-        Worth knowing before trusting a volume feature: IEX-only data carries
-        partial volume, so a session stitched from IEX and IBKR has a
-        discontinuity that no price column reveals.
-        """
-        return len(self.sources) > 1
-
-
-@dataclass(frozen=True, slots=True)
-class Gap:
-    """A run of missing bars inside a session.
-
-    Example:
-        >>> Gap(symbol=AAPL, session_date=date(2026, 3, 14), interval=BarInterval.MIN_1,
-        ...     after_ts=1_000, before_ts=1_000 + 5 * 60_000_000_000).missing_bars
-        4
-    """
-
-    symbol: Symbol  # instrument
-    session_date: date  # trading day
-    interval: BarInterval  # bar size the gap is measured against
-    after_ts: Nanos  # last bar present before the hole
-    before_ts: Nanos  # first bar present after the hole
-
-    @property
-    def missing_bars(self) -> int:
-        """How many bars the gap could hold.
-
-        A halt produces a genuine gap and so does a failed fetch; this number
-        does not distinguish them. `TradingHalt` events do, which is why §12.1
-        pairs gap detection with halt marking rather than treating every hole as
-        a fault.
-        """
-        return (self.before_ts - self.after_ts) // self.interval.nanos - 1
 
 
 class DuckDBCatalog:
@@ -337,12 +263,18 @@ class DuckDBCatalog:
 
     def duplicate_timestamps(
         self, interval: BarInterval = BarInterval.MIN_1
-    ) -> tuple[tuple[Symbol, date, Nanos, int], ...]:
+    ) -> tuple[Duplicate, ...]:
         """Bars sharing an instrument, interval and timestamp.
 
         Should always be empty: `ParquetStore` deduplicates on write. This exists
         to prove that rather than assume it, because a duplicate reads as double
         the volume and nothing downstream would flag it.
+
+        Args:
+            interval: Bar size to check.
+
+        Returns:
+            One `Duplicate` per offending timestamp, oldest first.
         """
         rows = self._query(
             """
@@ -356,14 +288,71 @@ class DuckDBCatalog:
             interval.value,
         )
         return tuple(
-            (
-                Symbol(str(row[1]), Venue(str(row[0]))),
-                _as_date(row[2]),
-                _as_int(row[3]),
-                _as_int(row[4]),
+            Duplicate(
+                symbol=Symbol(str(row[1]), Venue(str(row[0]))),
+                session_date=_as_date(row[2]),
+                interval=interval,
+                ts_event=_as_int(row[3]),
+                count=_as_int(row[4]),
             )
             for row in rows
         )
+
+    def suspect_sessions(
+        self, interval: BarInterval = BarInterval.MIN_1
+    ) -> tuple[SuspectSession, ...]:
+        """Sessions whose bars are present but do not look like trading.
+
+        The halt-marking half of §12.1 stage 5, done by inference rather than
+        from a halt feed we do not have. Two shapes are reported:
+
+        - **zero volume** across the whole session. A halted name still gets
+          rows; they just carry nothing.
+        - **no price movement** — one distinct close for the entire session,
+          with more than one bar. Legitimate for a very illiquid name, and a
+          halt or a stale feed otherwise.
+
+        Both matter because they read downstream as a calm, liquid instrument:
+        realised volatility collapses toward zero and anything sized off it
+        takes an unbounded position.
+
+        Args:
+            interval: Bar size to check.
+
+        Returns:
+            One `SuspectSession` per offending instrument-session, oldest
+            first. Empty is the result to want, but a non-empty answer is a
+            lead rather than a verdict.
+        """
+        rows = self._query(
+            """
+            SELECT venue, ticker, session_date, count(*) AS bars,
+                   sum(volume) AS total_volume,
+                   count(DISTINCT close) AS distinct_closes
+            FROM read_parquet('{glob}')
+            WHERE interval = ?
+            GROUP BY venue, ticker, session_date
+            HAVING sum(volume) = 0 OR (count(DISTINCT close) = 1 AND count(*) > 1)
+            ORDER BY session_date, venue, ticker
+            """,
+            interval.value,
+        )
+        found: list[SuspectSession] = []
+        for row in rows:
+            bars = _as_int(row[3])
+            # A session can be both; name the emptier fault, since zero volume
+            # explains a flat close but not the other way round.
+            reason = "zero volume" if not row[4] else "no price movement"
+            found.append(
+                SuspectSession(
+                    symbol=Symbol(str(row[1]), Venue(str(row[0]))),
+                    session_date=_as_date(row[2]),
+                    interval=interval,
+                    reason=reason,
+                    bar_count=bars,
+                )
+            )
+        return tuple(found)
 
     # ── Totals ───────────────────────────────────────────────
 
