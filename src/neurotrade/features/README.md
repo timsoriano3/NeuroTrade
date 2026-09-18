@@ -13,9 +13,16 @@ is not the software trading your money.
 | File | What it does |
 |---|---|
 | `registry.py` | Registering a feature, and the rules every feature obeys |
+| `indicators.py` | The registered features: log return, ATR, realised volatility, relative volume, EMA, fractionally differenced close |
+| `levels.py` | Session-anchored reference levels — opening range, session VWAP, distance from it. Plain functions, not registered |
 
-No features are implemented yet. They arrive in Phase 1, once there is a lab
-that can measure whether one is worth having.
+**Why `levels.py` sits outside the registry.** A registered feature declares a
+fixed lookback and is handed exactly that many bars. A level anchored to the
+session open has no fixed bar count — the distance from the open changes every
+minute — so there is nothing to declare. §5.3 already treats these as separate
+"shared infrastructure", so the split follows the spec rather than working
+around it. The cost is that the lookahead guard does not apply to them: pass
+bars up to the decision moment and no further.
 
 ## The two rules a feature obeys
 

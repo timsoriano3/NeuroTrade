@@ -61,3 +61,20 @@ of a catalog method before looping over it.
 **A dataclass in a report needs `__str__` or the terminal gets its `repr`.** The first real
 `corpus check` printed `(Symbol(ticker='JPM', venue=<Venue.NYSE: 'NYSE'>), datetime.date(2026, 9,
 11))` per line. Anything a command prints gets a `__str__`; anything it only counts does not.
+
+## Features
+
+**A smoothed indicator that carries state across windows breaks reproducibility.** Wilder's ATR
+and a continuously-maintained EMA both depend on where the series started, so the same bar gets a
+different value depending on how much history the slice included — backtest and live disagree,
+silently. Both are computed from the declared window alone here, and tests pin it by prepending 50
+unrelated bars and asserting no change.
+
+**`Decimal` division runs to context precision, and a `Price` is an order price.** `session_vwap`
+over a real session returned `330.2556630065255193527176013`, which `decimal128(18, 8)` refuses
+outright. Any computed `Price` gets quantized at the boundary. Second time this class of bug
+appeared; see the Decimal section above.
+
+**`Price` refuses a non-positive value at construction.** A zero-division guard against a zero
+price is unreachable code pretending to be a safeguard — a test asserted the guard's message and
+got "Price must be positive" instead, which is how it was found.
