@@ -41,9 +41,18 @@ downloads.
 at local midnight — the *start* of the day — and keeping that stamp would claim the whole day's
 range was known before the open. Early closes need no special case.
 
-**Prices are unadjusted (`auto_adjust=False`), and `Adj Close` is discarded.** Raw stays raw;
-adjustment is stage 5, computed from corporate actions. A back-adjusted price would bake today's
-split history into a bar that is never re-downloaded.
+**Prices are DIVIDEND-unadjusted (`auto_adjust=False`), and `Adj Close` is discarded — but they
+are split-adjusted, which this doc previously got wrong.** `auto_adjust=False` suppresses only
+the dividend adjustment. Yahoo's OHLC is *always* split-adjusted, and there is no option to turn
+that off. Measured 2026-09-17: AMZN's stored closes run 121-125 straight through its 20:1 split
+on 2022-06-06, a week when it traded near $2,400.
+
+The consequence is not cosmetic. Applying a split factor to this corpus divides by the ratio a
+second time, and the first run of `neurotrade actions check` duly reported a phantom 20x gap at
+AMZN's split and twelve more like it. `scan_gaps` now takes `already_split_adjusted`, which the
+CLI sets for this source. Anything else reading `derived/daily/yfinance/` must know the same
+thing: **these bars are already on one split basis.** The IBKR minute corpus and the vendor
+samples are not.
 
 **Bars land in `derived/daily/yfinance/`, never beside the minute bars.** Same reason the seed
 feeds get their own root: the catalog counts bars without looking at provenance, so a daily bar

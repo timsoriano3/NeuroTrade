@@ -66,6 +66,8 @@ make seed           # seed the corpus from free vendor samples: fetch then inges
 make seed-fetch / seed-ingest   # either half alone. SOURCE=firstrate|kibot [SNAPSHOT=]
 make daily          # fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
 make universe       # build point-in-time universe membership. START=YYYY-MM-DD [END=]
+make actions        # fetch splits and dividends from Yahoo. START=YYYY-MM-DD [END=]
+make actions-check  # audit the daily corpus for gaps no action explains. START=YYYY-MM-DD [END= THRESHOLD=]
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`

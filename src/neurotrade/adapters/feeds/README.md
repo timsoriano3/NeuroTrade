@@ -14,6 +14,7 @@ whole universe, Canadian `.TO` lines included (§12.1 stage 3).
 | `firstrate.py` | `FirstRateFeed` — `MarketDataPort` reading a FirstRateData sample zip already on disk |
 | `kibot.py` | `KibotFeed` — `MarketDataPort` reading a Kibot `_unadjusted` sample file already on disk |
 | `yfinance_daily.py` | `YFinanceDailyFeed` — `MarketDataPort` serving unadjusted daily bars from Yahoo, one download per symbol; `YahooDownloader` is the network half and `yahoo_ticker` the name mapping |
+| `yfinance_actions.py` | `YFinanceActions` — `CorporateActionsPort` serving splits and dividends from Yahoo, cached per symbol; `YahooActionsDownloader` is the network half |
 | `_bars.py` | The ET-open to UTC-close conversion shared by the two sample feeds |
 | `errors.py` | `FeedError` — raised by the feeds and the downloader |
 

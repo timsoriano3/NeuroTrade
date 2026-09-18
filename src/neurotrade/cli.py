@@ -21,6 +21,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -44,10 +45,12 @@ from neurotrade.adapters.feeds.vendor_download import (
     latest_snapshot,
     read_manifest,
 )
+from neurotrade.adapters.feeds.yfinance_actions import YFinanceActions
 from neurotrade.adapters.feeds.yfinance_daily import YFinanceDailyFeed
 from neurotrade.adapters.ibkr.broker import IbkrBroker
 from neurotrade.adapters.ibkr.connection import IbkrConnection, IbkrConnectionError
 from neurotrade.adapters.ibkr.market_data import IbkrMarketData
+from neurotrade.adapters.storage.actions_parquet import ActionStore
 from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.adapters.storage.parquet_store import ParquetStore
@@ -69,6 +72,7 @@ from neurotrade.core.ids import IntentId, OrderId, RunId
 from neurotrade.core.orders import Fill, Order, OrderType
 from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol, Venue
 from neurotrade.core.universe import Universe, UniverseHistory
+from neurotrade.ingest.actions import fetch_actions, scan_gaps
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
 from neurotrade.ingest.universe_history import LiquidityFloor, ScreenRules, screen_universe
 from neurotrade.lab.replay import ReplayEngine
@@ -134,6 +138,9 @@ app.add_typer(daily_app, name="daily")
 
 universe_app = typer.Typer(help="Point-in-time universe membership.", no_args_is_help=True)
 app.add_typer(universe_app, name="universe")
+
+actions_app = typer.Typer(help="Corporate actions and price adjustment.", no_args_is_help=True)
+app.add_typer(actions_app, name="actions")
 
 
 @app.callback()
@@ -1213,6 +1220,168 @@ async def _await_status(
         if trade.orderStatus.status in wanted:
             break
     return trade.orderStatus.status
+
+
+@actions_app.command("fetch")
+def actions_fetch(
+    ctx: typer.Context,
+    start: Annotated[
+        datetime,
+        typer.Option("--start", help="First effective date to collect.", formats=["%Y-%m-%d"]),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end",
+            help="Last effective date to collect. Defaults to today, UTC.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the instruments.")
+    ] = _DEFAULT_UNIVERSE,
+) -> None:
+    """Fetch splits and dividends from Yahoo (§12.1 stage 5).
+
+    Writes one file to `<derived_dir>/actions/yfinance/actions.parquet`, holding
+    every instrument fetched — including those with no actions at all, which are
+    recorded as fetched-and-empty so a missing fetch cannot be mistaken for a
+    name that never split.
+
+    This is the prerequisite for labelling anything. An unadjusted 4:1 split
+    reads as a 75% overnight loss, which trips a stop barrier on a position that
+    never lost a cent, so a corpus without this is not merely noisy — it is
+    confidently wrong on exactly the dates that matter.
+
+    Run `neurotrade actions check` afterwards: the fetch cannot detect a split
+    Yahoo failed to report, and only the prices can.
+
+    Exits 2 on a bad universe file or an inverted range, 1 if every symbol
+    failed.
+
+    Example:
+        $ neurotrade actions fetch --start 2015-01-01
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+
+    first = start.date()
+    last = end.date() if end is not None else to_datetime(clock.now_ns()).date()
+    if last < first:
+        typer.echo(f"--end {last} is before --start {first}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    collected, report = asyncio.run(
+        fetch_actions(universe, YFinanceActions(), start=first, end=last)
+    )
+    for symbol, reason in report.failures:
+        typer.echo(f"failed {symbol}: {reason}", err=True)
+    if not collected:
+        typer.echo("no symbol could be fetched", err=True)
+        raise typer.Exit(code=1)
+
+    store = ActionStore(settings.storage.derived_dir / "actions" / Source.YFINANCE.value)
+    path = store.write(collected, clock=clock, config_hash=config_hash(settings))
+    typer.echo(report.describe(), err=True)
+    typer.echo(path)
+
+
+@actions_app.command("check")
+def actions_check(
+    ctx: typer.Context,
+    start: Annotated[
+        datetime,
+        typer.Option("--start", help="First session to audit.", formats=["%Y-%m-%d"]),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end",
+            help="Last session to audit. Defaults to yesterday, UTC.",
+            formats=["%Y-%m-%d"],
+        ),
+    ] = None,
+    threshold: Annotated[
+        float,
+        typer.Option(
+            "--threshold",
+            help="Fractional overnight move past which a gap is reported.",
+        ),
+    ] = 0.25,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the instruments.")
+    ] = _DEFAULT_UNIVERSE,
+) -> None:
+    """Audit the daily corpus for moves the recorded actions do not explain.
+
+    This is how the adjustment proves itself. A feed that omits a split leaves
+    no error behind: the prices are plausible, the file is well formed, and only
+    the size of one overnight move gives it away. So the corpus is asked
+    directly — apply every action we hold, then look for what is left.
+
+    Each reported gap names the implied split ratio, which is usually enough to
+    identify the missing action by eye.
+
+    Exits 1 when any gap is unexplained, so it can gate a pipeline. Exits 2 on a
+    bad universe file, an inverted range, or a missing action set.
+
+    Example:
+        $ neurotrade actions check --start 2022-01-03
+        $ neurotrade actions check --start 2022-01-03 --threshold 0.15
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+    clock = LiveClock()
+
+    first = start.date()
+    last = end.date() if end is not None else to_datetime(clock.now_ns()).date() - timedelta(days=1)
+    if last < first:
+        typer.echo(f"--end {last} is before --start {first}", err=True)
+        raise typer.Exit(code=2)
+    if threshold <= 0:
+        typer.echo(f"--threshold {threshold} must be positive", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    store = ActionStore(settings.storage.derived_dir / "actions" / Source.YFINANCE.value)
+    try:
+        actions = store.read()
+    except FileNotFoundError as error:
+        typer.echo(f"{error} — run `neurotrade actions fetch` first", err=True)
+        raise typer.Exit(code=2) from error
+
+    daily_root = settings.storage.derived_dir / "daily" / Source.YFINANCE.value
+    report = scan_gaps(
+        universe,
+        ParquetStore(daily_root, clock),
+        actions,
+        start=first,
+        end=last,
+        # repr() first: Decimal(0.25) keeps the binary expansion and would make
+        # the threshold marginally different from the one typed.
+        threshold=Decimal(repr(threshold)),
+        # Yahoo's OHLC is split-adjusted even with auto_adjust=False, so the
+        # daily corpus is already on one basis. Adjusting again would report a
+        # phantom gap at every split. See `scan_gaps` for the evidence.
+        already_split_adjusted=True,
+    )
+    for gap in report.gaps:
+        typer.echo(str(gap), err=True)
+    typer.echo(report.describe(), err=True)
+    if not report.clean:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
 from typing import Protocol, runtime_checkable
 
+from neurotrade.core.actions import CorporateAction
 from neurotrade.core.calendar import TradingSession
 from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar, BarInterval, Event
@@ -44,6 +45,7 @@ __all__ = [
     "BrokerPort",
     "CalendarPort",
     "CatalogPort",
+    "CorporateActionsPort",
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
@@ -373,6 +375,59 @@ class UniversePort(Protocol):
             A non-empty `Universe`. Emptiness is rejected at construction
             rather than returned, because every caller would read an empty
             universe as "nothing to do" and report success having done nothing.
+        """
+        ...
+
+
+@runtime_checkable
+class CorporateActionsPort(Protocol):
+    """Splits and dividends for an instrument (§12.1 stage 5).
+
+    Separate from `MarketDataPort` because an action is not a market event. It
+    is an administrative fact with an effective date, it is revised after the
+    fact when a feed corrects itself, and it arrives from a different source
+    than the bars it applies to — so a port that served both would have to
+    pretend one shape fits two lifecycles.
+
+    **Asynchronous**, unlike `UniversePort` and `CalendarPort`: every
+    implementation so far is an HTTP call per instrument, and a universe-wide
+    fetch that blocked the loop would serialise what should overlap.
+
+    Implementations return the actions they know about *now*. Restricting them
+    to what was knowable at some past date is `AdjustmentSeries`'s job, not the
+    feed's — a feed cannot report what it has not been told, and pushing
+    point-in-time logic down here would scatter it across every adapter.
+
+    Example:
+        Conformance is structural — no import from this module is needed:
+
+        >>> class NoActions:
+        ...     async def fetch_actions(self, symbol, start, end):
+        ...         return ()
+        >>> isinstance(NoActions(), CorporateActionsPort)
+        True
+    """
+
+    async def fetch_actions(
+        self, symbol: Symbol, start: date, end: date
+    ) -> Sequence[CorporateAction]:
+        """Actions effective within `[start, end]`, inclusive at both ends.
+
+        Args:
+            symbol: The instrument to fetch for.
+            start: First effective date of interest.
+            end: Last effective date of interest.
+
+        Returns:
+            The actions, in any order — `AdjustmentSeries` sorts them. An empty
+            result means no actions in range, which is the common case and not
+            an error: most instruments go years without a split.
+
+        Raises:
+            Exception: Implementations raise their own adapter-level error on a
+                failed fetch. An empty tuple must never stand in for a failure,
+                because a missing split is indistinguishable from a name that
+                never split, and the corpus would silently lose the adjustment.
         """
         ...
 

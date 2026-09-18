@@ -16,6 +16,7 @@ goodwill.
 | `clock.py` | The single source of time. Real in production, simulated in replay |
 | `events.py` | What the market did: bars, quotes, trade prints, session changes, halts |
 | `calendar.py` | The shape of a trading day — when a session opened, closed, and how many bars it should hold |
+| `actions.py` | Splits and dividends, and the factors that put prices on one basis. Also the gap scan that catches an action the feed never reported |
 | `ids.py` | Identifiers, derived from content so a replay reproduces them |
 | `codec.py` | Turning events into text and back, without losing precision |
 | `intent.py` | What a strategy proposes: a side and where the idea is wrong |

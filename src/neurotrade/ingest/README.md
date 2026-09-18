@@ -12,6 +12,7 @@ from live market data. This package is that plan.
 | `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work |
 | `crawler.py` | `crawl` — one pass: plan, fetch each missing session from the feed, write it to the store. `CrawlReport` says what the pass did |
 | `universe_history.py` | `screen_universe` — who was tradable on each past session, from the daily corpus. `ScreenRules` and `LiquidityFloor` are the thresholds |
+| `actions.py` | `fetch_actions` — collect every instrument's splits and dividends. `scan_gaps` — audit the daily corpus for overnight moves those actions do not explain |
 
 Wired to real adapters — Parquet store, DuckDB catalog, venue calendar,
 universe file, and a feed — in `cli.py`, which is the only place those

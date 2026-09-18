@@ -8,14 +8,15 @@ Injected automatically at session start, so it must stay short.
 | Phase | Title | State |
 |---|---|---|
 | 0 | Foundation & data spine | **Gates cleared, deliverables incomplete** |
-| 1 | Research Lab | Not started |
+| 1 | Research Lab | **In progress** — §12.1 stage 5 adjustment landed |
 | 2–8 | — | Not started |
 
 Phase 0 exit gates, both verified:
 - **G1** — a session replays bit-for-bit. `make verify-replay` → `4f58fe2c99cd26dc7cbb8faf033a39d1`
 - **G2** — a paper order round-trips against account `DUT108414`. `make paper-smoke`
 
-**§12.1 stages 1–3 all delivered** (2026-09-15). What Phase 0 still owes is corpus *depth* —
+Corporate actions: 43 symbols, 18 splits, 1,588 dividends (`derived/actions/yfinance/`); the
+daily corpus audits to 4 gaps, all real news moves. **§12.1 stages 1–3 delivered** (2026-09-15). What Phase 0 still owes is corpus *depth* —
 crawl time, not code. Corpus now: IBKR minute bars 47,580 over 41 names (`raw/bars/`, the weekday
 crawl works; 55 requests per 10 min means weeks to target); seed samples 1,019,421
 (`derived/seed/`); daily bars 53,879 over 43 names, 2021-09-15 → 2026-09-11; universe history
@@ -40,6 +41,14 @@ crawl works; 55 requests per 10 min means weeks to target); seed samples 1,019,4
 | `13-daily-bars.doc.md` | `adapters/feeds/yfinance_daily.py` + `neurotrade daily backfill` — daily bars from Yahoo, and why they are unadjusted | Touching daily bars |
 | `14-universe-history.doc.md` | `ingest/universe_history.py` + `neurotrade universe build` — point-in-time membership, the PIT rule, the bias flag | Touching the universe or anything point-in-time |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Non-obvious traps with their fixes | **Before writing code — highest value per token** |
+
+## Phase 1 — Research Lab
+
+| Doc | Covers | Read it when |
+|---|---|---|
+| `00-phase-1.plan.md` | **Plan** — the eight commits, the spread decision, why adjustment came first | Starting any Phase 1 work |
+| `01-corporate-actions.doc.md` | `core/actions.py`, `adapters/feeds/yfinance_actions.py`, `ActionStore`, `ingest/actions.py`, the two CLI commands | Touching adjustment, splits or dividends |
+| `08-gotchas.doc.md` | **Bugs already paid for.** Yahoo's hidden split adjustment, Decimal notation traps | **Before writing code** |
 
 ## Why the working agreements exist
 

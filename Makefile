@@ -15,7 +15,7 @@ PY := uv run
 # Usage: $(call have,go) — true when the executable is on PATH.
 have = command -v $(1) >/dev/null 2>&1
 
-.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest daily universe docs-check \
+.PHONY: help doctor setup check fmt lint typecheck test clean show-config replay verify-replay ibkr-check paper-smoke backfill seed seed-fetch seed-ingest daily universe actions actions-check docs-check \
         py-fmt py-lint py-typecheck py-test \
         go-fmt go-lint go-test \
         ts-fmt ts-lint ts-typecheck ts-test
@@ -148,6 +148,20 @@ universe: ## Build point-in-time universe membership. START=YYYY-MM-DD [END=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
 	$(PY) neurotrade --profile $(PROFILE) universe build --start $(START) \
 	  $(if $(END),--end $(END))
+
+# Corporate actions and the adjustment audit (§12.1 stage 5). `actions` fetches
+# splits/dividends from Yahoo into derived/actions/yfinance; `actions-check`
+# audits the daily corpus against them and exits non-zero on any gap no
+# recorded action explains.
+actions: ## Fetch splits and dividends from Yahoo. START=YYYY-MM-DD [END=]
+	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
+	$(PY) neurotrade --profile $(PROFILE) actions fetch --start $(START) \
+	  $(if $(END),--end $(END))
+
+actions-check: ## Audit the daily corpus for unexplained gaps. START=YYYY-MM-DD [END= THRESHOLD=]
+	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
+	$(PY) neurotrade --profile $(PROFILE) actions check --start $(START) \
+	  $(if $(END),--end $(END)) $(if $(THRESHOLD),--threshold $(THRESHOLD))
 
 replay: ## Replay a session and print its digest. SESSION=YYYY-MM-DD or LOG=path
 	@if [ -n "$(SESSION)" ]; then \

@@ -22,6 +22,7 @@ reading every byte of it.
 | `parquet_store.py` | Reads and writes the corpus. Writes are idempotent |
 | `duckdb_catalog.py` | Questions *about* the corpus: what is held, what is missing |
 | `event_store.py` | The append-only session log |
+| `actions_parquet.py` | `ActionStore` — the corporate-action set as one file under `derived/actions/` |
 
 Events are turned into text by `core/codec.py`, not here. It lives in `core`
 because the research lab needs it too, and a layer may not reach into an adapter
