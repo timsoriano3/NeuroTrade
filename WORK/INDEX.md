@@ -8,7 +8,7 @@ Injected automatically at session start, so it must stay short.
 | Phase | Title | State |
 |---|---|---|
 | 0 | Foundation & data spine | **Gates cleared, deliverables incomplete** |
-| 1 | Research Lab | **In progress** — stage 5 complete, feature library v1 |
+| 1 | Research Lab | **In progress** — stage 5, features, labelling + costs |
 | 2–8 | — | Not started |
 
 Phase 0 exit gates, both verified:
@@ -50,6 +50,7 @@ crawl works; 55 requests per 10 min means weeks to target); seed samples 1,019,4
 | `01-corporate-actions.doc.md` | `core/actions.py`, `adapters/feeds/yfinance_actions.py`, `ActionStore`, `ingest/actions.py`, the two CLI commands | Touching adjustment, splits or dividends |
 | `02-corpus-quality-gate.doc.md` | `core/quality.py`, `CorpusQualityPort`, `ingest/quality.py`, `neurotrade corpus check` | Auditing the corpus, or adding a check |
 | `03-feature-library.doc.md` | `features/indicators.py` and `features/levels.py` — the first features, and why levels sit outside the registry | Adding a feature |
+| `04-labelling-and-costs.doc.md` | `lab/labelling.py` and `core/costs.py` — triple barriers, uniqueness weights, spread/commission/slippage | Labelling, or anything about what a trade costs |
 | `08-gotchas.doc.md` | **Bugs already paid for.** Yahoo's hidden split adjustment, Decimal notation traps | **Before writing code** |
 
 ## Why the working agreements exist

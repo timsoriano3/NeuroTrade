@@ -12,9 +12,15 @@ difference.
 | File | What it does |
 |---|---|
 | `replay.py` | Replays a recorded session and proves the replay was faithful |
+| `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
 
-Most of the lab is still ahead: labelling, cross-validation, the cost model, and
-the ledger that counts every hypothesis tested. Those are Phase 1.
+Still ahead: cross-validation (CPCV with purging and embargo), deflated Sharpe
+and PBO, and the ledger that counts every hypothesis tested.
+
+**The cost model is not here** — it is `core/costs.py`. Costs are applied inside
+the backtest (§3.3), but the live engine needs the same numbers to decide
+whether a signal beats its own cost, and `execution/` cannot import `lab/`. One
+implementation, in the layer both sides reach.
 
 ## Replay, and why the digest matters
 

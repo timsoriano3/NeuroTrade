@@ -78,3 +78,18 @@ appeared; see the Decimal section above.
 **`Price` refuses a non-positive value at construction.** A zero-division guard against a zero
 price is unreachable code pretending to be a safeguard — a test asserted the guard's message and
 got "Price must be positive" instead, which is how it was found.
+
+## Labelling and costs
+
+**`FlooredSpread` floors at one tick, so there is no such thing as a free cost model.** A test
+fixture named `FREE` with every fee zeroed still charged a tick crossed twice, and a 2% gross win
+came back as 1.99%. The floor is correct — nothing trades tighter than a tick — but a test that
+expects exact gross arithmetic will fail, and the fixture is the thing that is wrong.
+
+**Costs are bigger than small barriers.** A 10bp profit target on a $100 name does not survive a
+5c spread crossed twice plus commission; break-even was around 6bp at 1,000 shares. Worth knowing
+before wondering why a scalping strategy labels as a loss.
+
+**`lab/` cannot be imported by `execution/`.** Anything both research and live need — the cost
+model, the feature implementations, the labelling definitions that live code must agree with —
+belongs in `core/`. The plan put costs in `lab/` and it had to move.
