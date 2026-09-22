@@ -12,7 +12,7 @@ the strategy arsenal, ML stack, validation methodology, data plan, phased roadma
 metrics. Read the relevant section before implementing anything in that area. This file covers only
 what `TRADER_PLAN.md` does not: how to work in the repo.
 
-**Current status lives in `WORK/INDEX.md`**, which a hook injects at session start. Keep it
+**Current status lives in `WORK/INDEX.mem.md`**, which a hook injects at session start. Keep it
 current. Do not restate it here.
 
 ## Session context — read this before exploring
@@ -20,11 +20,21 @@ current. Do not restate it here.
 `WORK/` is the project's context ledger. It exists so a session can learn what has been built by
 reading ~40 lines instead of 15k lines of source.
 
-- `WORK/INDEX.md` — the map, plus project status.
-- `WORK/phase <#> - <title>/<subtitle>.doc.md` — one coherent subsystem per file.
+**`WORK/` is gitignored and local-only**, like `TRADER_PLAN.md`. It grows without bound and none
+of it belongs in the repo's history, so it never appears in a commit and is never staged. The cost
+is that it does not survive a fresh clone — treat it as this machine's memory, not as a deliverable.
+
+- `WORK/INDEX.mem.md` — the map, plus project status. **Cap 45 lines**; injected every session.
+- `WORK/phase <#> - <title>/<subtitle>.doc.md` — one coherent subsystem per file. **Cap ~100.**
+- `WORK/phase <#> - <title>/08-gotchas.mem.md` — the traps for that phase.
 - `WORK/cost-and-delegation.doc.md` — the measurements behind the working agreements below.
 
-**Open only the doc the task needs.** `08-gotchas.doc.md` in each phase folder is the highest value
+**The suffix says whether writing it needs permission** (global rules, Working files): `.mem.md` is
+state, `.doc.md` and `.plan.md` are reasoning, and both are written only at the commit checkpoint
+on an explicit yes. Gotchas are a `.mem.md` precisely so a trap that would otherwise be lost can be
+recorded without waiting for the gate.
+
+**Open only the file the task needs.** `08-gotchas.mem.md` in each phase folder is the highest value
 per token in the repo — the list of bugs already paid for, and cheaper to read than to rediscover.
 
 `TRADER_PLAN.md` is the spec and is large. **Never read it whole.** `grep -n` for the heading and
@@ -32,13 +42,23 @@ per token in the repo — the list of bugs already paid for, and cheaper to read
 
 ### Checkpointing and clearing
 
-**Journalling is part of every commit — do not ask.** Once a commit's work passes its gate and
-audits, run the `work-journal` skill *before* the commit handoff, so the WORK/ update lands in the
-same commit as the code it describes. Do it while the session still holds the decisions; after a
-clear, the brief has to be reconstructed. Journalling happens at the session's peak context, so
-write from git and slices rather than re-reading source you no longer hold. Pick the doc path
-yourself — rewrite the existing subsystem doc, or name a new
-`WORK/phase <#> - <title>/<subtitle>.doc.md` — and state it in the handoff.
+**Journalling is gated — always ask first.** Once a commit's work passes its gate and audits, put
+the journal-worthy findings in chat, then ask, verbatim:
+
+> **"Have you reviewed the code and want to update the working files?"**
+
+Only an explicit yes licenses a write; silence, a question, or a new instruction does not. On yes,
+run the `work-journal` skill for everything accumulated since the last write — not just the last
+exchange. Pick the path yourself, rewriting the existing subsystem doc or naming a new
+`WORK/phase <#> - <title>/<subtitle>.doc.md`, and say which you wrote.
+
+Journalling happens at the session's peak context, so write from git and slices rather than
+re-reading source you no longer hold. **WORK/ is gitignored**, so the write is never part of the
+commit and never staged — it lands on disk only.
+
+**The exemption:** a trap that would be lost before the next checkpoint goes straight into the
+phase's `08-gotchas.mem.md` without asking, as does an index update when the window is about to be
+cleared. Say in one line that you did it and why.
 
 **One commit per window, then clear.** A compaction resets the floor and the window regrows from
 there; clearing after a checkpoint does not. Two hooks raise this mechanically — one at turn end on work
@@ -271,8 +291,8 @@ Do **not** mix unrelated scopes in one commit, and do not commit anything yourse
 1. Break the plan into commits **grouped by scope** (see below), each logically complete on its own.
 2. Implement **one** commit's worth of changes, then stop.
 3. Audit the diff (invariants, then docs drift) — see Working procedures.
-4. Run the `work-journal` skill for this commit's work (see Checkpointing), without asking.
-5. Write the commit handoff below, covering code and WORK/ together.
+4. Write the commit handoff below. It covers the code only — WORK/ is gitignored.
+5. Ask the working-files question (see Checkpointing) and journal only on a yes.
 6. **Wait.** Do not begin the next commit until the user says they have committed and to proceed.
 
 The user commits. Claude never runs `git commit` unless explicitly asked.

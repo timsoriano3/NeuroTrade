@@ -155,3 +155,6 @@ Thumbs.db
 # ── Test fixtures are exempt from the data rules above ───────
 !tests/fixtures/**
 !**/testdata/**
+
+# Local context ledger: grows without bound, never part of the repo history.
+WORK/

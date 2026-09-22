@@ -6,11 +6,11 @@
 # reading all of WORK/. The index is deliberately kept short for this reason.
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-idx="$root/WORK/INDEX.md"
+idx="$root/WORK/INDEX.mem.md"
 [[ -f $idx ]] || exit 0
 
 echo "<work-ledger>"
-echo "Project state from WORK/INDEX.md. Open a specific .doc.md only when the task needs it."
+echo "Project state from WORK/INDEX.mem.md. Open a specific .doc.md / .mem.md only when the task needs it."
 cat "$idx"
 echo "</work-ledger>"
 
