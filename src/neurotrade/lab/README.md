@@ -13,9 +13,32 @@ difference.
 |---|---|
 | `replay.py` | Replays a recorded session and proves the replay was faithful |
 | `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
+| `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
+| `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
+| `trials.py` | The ledger the deflation counts against — every hypothesis tested, by anything |
 
-Still ahead: cross-validation (CPCV with purging and embargo), deflated Sharpe
-and PBO, and the ledger that counts every hypothesis tested.
+Still ahead: the exit gate — a deliberately overfit control strategy the lab
+has to reject.
+
+## Why three modules and not one
+
+They answer three different questions, and the order matters.
+
+`cv.py` produces a **distribution** instead of a number: `C(N, k)` splits
+assemble into `C(N, k)·k/N` complete backtest paths, each trained on a
+different combination of the sample. One backtest cannot tell a good strategy
+from a lucky one; a spread across paths can.
+
+`significance.py` asks what that distribution is worth **given how hard we
+looked**. The best of 500 tries posts a fine Sharpe ratio even when all 500 are
+worthless, so the deflated Sharpe sets the hurdle at what the search itself
+would have produced from noise, and PBO asks the blunter question of whether
+picking the in-sample winner beats picking at random.
+
+`trials.py` supplies the number of tries. It has to be persistent and
+append-only, because the count that matters includes the searches nobody kept —
+and a count assembled from the results we chose to remember is exactly the
+count that makes every result look significant.
 
 **The cost model is not here** — it is `core/costs.py`. Costs are applied inside
 the backtest (§3.3), but the live engine needs the same numbers to decide

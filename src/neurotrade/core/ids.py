@@ -32,6 +32,7 @@ __all__ = [
     "IntentId",
     "OrderId",
     "RunId",
+    "TrialId",
 ]
 
 _DIGEST_CHARS = 16
@@ -257,3 +258,34 @@ class RunId(_DerivedId):
             RunId(value='run_70cb2f8ca1524537')
         """
         return cls._from_parts(config_hash, started_ns)
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class TrialId(_DerivedId):
+    """Identifies one recorded hypothesis test in the trial ledger.
+
+    Derived rather than generated so that re-running a research script against
+    the same configuration at the same simulated instant produces the same id,
+    and the ledger can be rebuilt without gaining phantom trials. Two genuinely
+    distinct tests differ in at least one of the three parts.
+    """
+
+    PREFIX: ClassVar[str] = "trl"
+
+    @classmethod
+    def derive(cls, *, hypothesis: str, config_hash: str, recorded_ns: int) -> Self:
+        """Derive the id for one trial.
+
+        Args:
+            hypothesis: The statement being tested, as recorded.
+            config_hash: Fingerprint of the configuration in force.
+            recorded_ns: Time from the run's `Clock`.
+
+        Returns:
+            A stable `TrialId`.
+
+        Example:
+            >>> TrialId.derive(hypothesis="orb 15m", config_hash="cfg_a", recorded_ns=1_000)
+            TrialId(value='trl_2baa928f60e9d0a4')
+        """
+        return cls._from_parts(hypothesis, config_hash, recorded_ns)

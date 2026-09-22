@@ -93,3 +93,28 @@ before wondering why a scalping strategy labels as a loss.
 **`lab/` cannot be imported by `execution/`.** Anything both research and live need — the cost
 model, the feature implementations, the labelling definitions that live code must agree with —
 belongs in `core/`. The plan put costs in `lab/` and it had to move.
+
+## Validation harness
+
+**Purging against the hull of all test groups destroys the training set.** A CPCV split holds out
+`k` groups that are usually not adjacent — 0 and 5 of 6, say. Taking `(min start, max end)` across
+all of them and purging anything that overlaps purges the entire middle of the sample, which *is*
+the training data, and reports it as a purge count nobody reads. `purge_and_embargo` therefore
+takes `test_blocks` — one sequence per contiguous run — not a flat test set. Nothing fails when
+this is wrong: the splits still run, training is just tiny and the model is noise.
+
+**A constant return series has no Sharpe ratio, and that silently inverts PBO.** A CSCV fixture of
+two strategies with flat returns (`0.02` every period versus `-0.01` every period) makes both
+columns zero-variance, so both score 0.0, every split ties, and PBO comes back 1.0 for a strategy
+that was strictly better in every block. Any fixture feeding `probability_of_backtest_overfitting`
+needs real variance. `_column_sharpe` scores a degenerate column 0.0 rather than raising, because
+a strategy that did not trade in a subsample is a real outcome to rank.
+
+**`pytest.raises(match=...)` is a REGEX — an alternation needs a raw string.**
+`match="must (be at least 1|not be negative)"` fails ruff RUF043. Sixth occurrence across the
+project.
+
+**A trailing field comment that pushes a line past 100 chars gets the value wrapped in parens.**
+`ruff format` turned a `StrEnum` member into `DISCOVERY = (\n "discovery"  # ...\n)` rather than
+moving the comment. Field comments are required by the documentation standard, so keep the whole
+line inside the limit instead of relying on the formatter.

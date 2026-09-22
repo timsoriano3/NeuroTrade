@@ -23,6 +23,7 @@ reading every byte of it.
 | `duckdb_catalog.py` | Questions *about* the corpus: what is held, what is missing |
 | `event_store.py` | The append-only session log |
 | `actions_parquet.py` | `ActionStore` — the corporate-action set as one file under `derived/actions/` |
+| `trial_ledger.py` | `TrialLedgerStore` — the append-only trial ledger, one JSONL file for the project's lifetime |
 
 Events are turned into text by `core/codec.py`, not here. It lives in `core`
 because the research lab needs it too, and a layer may not reach into an adapter

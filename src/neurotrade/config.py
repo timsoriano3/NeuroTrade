@@ -123,6 +123,22 @@ class StorageSettings(BaseModel):
         """
         return self.events_dir / f"{session}.jsonl"
 
+    @property
+    def trial_ledger(self) -> Path:
+        """The trial ledger (§8) — every hypothesis ever tested, one file.
+
+        Not under `derived_dir`: it is not recomputable. Re-running a search
+        would produce the same trials, but the trials that were *abandoned*
+        halfway, or run under a configuration nobody kept, are gone the moment
+        this file is. Losing it silently lowers every future deflation hurdle,
+        so it sits beside the event logs as part of the audit trail.
+
+        Example:
+            >>> StorageSettings(data_root=Path("/tmp/x")).trial_ledger
+            PosixPath('/tmp/x/trials/ledger.jsonl')
+        """
+        return self.data_root / "trials" / "ledger.jsonl"
+
 
 class IbkrSettings(BaseModel):
     """How to reach IB Gateway.

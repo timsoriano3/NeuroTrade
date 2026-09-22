@@ -39,6 +39,7 @@ from neurotrade.core.events import Bar, BarInterval, Event
 from neurotrade.core.ids import OrderId
 from neurotrade.core.orders import Order
 from neurotrade.core.quality import Coverage, Duplicate, Gap, SuspectSession
+from neurotrade.core.trials import Trial
 from neurotrade.core.types import Symbol, Venue
 from neurotrade.core.universe import Universe
 
@@ -51,6 +52,7 @@ __all__ = [
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
+    "TrialLedgerPort",
     "UniversePort",
 ]
 
@@ -571,5 +573,53 @@ class CatalogPort(Protocol):
             Session date to bar count, for sessions holding at least one bar.
             Absent means none held. Empty when the corpus holds nothing for
             this instrument, which is ordinary rather than exceptional.
+        """
+        ...
+
+
+@runtime_checkable
+class TrialLedgerPort(Protocol):
+    """The append-only record of every hypothesis tested (§8).
+
+    Deliberately not folded into `EventStorePort`. A session's event log is
+    scoped to one run and is rotated with it; the trial ledger outlives every
+    run, because the deflation in `lab/significance.py` has to count trials
+    from months ago against a candidate tested today. Two lifetimes, two
+    stores.
+
+    Append-only for the same reason the event log is, one level up in
+    seriousness: a ledger a process can delete from is a ledger that reports
+    whatever search size makes its result look best.
+
+    Example:
+        >>> class MemoryLedger:
+        ...     def __init__(self): self._trials = []
+        ...     def append(self, trial): self._trials.append(trial)
+        ...     def trials(self, family=None):
+        ...         return tuple(t for t in self._trials if family in (None, t.family))
+        >>> isinstance(MemoryLedger(), TrialLedgerPort)
+        True
+    """
+
+    def append(self, trial: Trial) -> None:
+        """Record one trial.
+
+        Args:
+            trial: The hypothesis and what it scored. Appended whatever the
+                result — recording only the good ones is the under-count the
+                ledger exists to prevent.
+        """
+        ...
+
+    def trials(self, family: str | None = None) -> tuple[Trial, ...]:
+        """Every trial recorded, oldest first.
+
+        Args:
+            family: Restrict to one search space. Deflation is computed within
+                a family, because the expected maximum across N tries of one
+                idea says nothing about a different idea tried once.
+
+        Returns:
+            The matching trials in the order they were appended.
         """
         ...

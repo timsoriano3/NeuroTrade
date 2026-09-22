@@ -19,6 +19,7 @@ goodwill.
 | `actions.py` | Splits and dividends, and the factors that put prices on one basis. Also the gap scan that catches an action the feed never reported |
 | `quality.py` | How to describe a corpus: `Coverage`, `Gap`, `Duplicate`, `SuspectSession`. Returned by `CorpusQualityPort`, so they cannot live in an adapter |
 | `costs.py` | What a trade costs: spread, commission, modelled slippage. In `core` so research and live share one implementation |
+| `trials.py` | `Trial` — one recorded hypothesis test. Returned by `TrialLedgerPort`, so it cannot live in `lab/` |
 | `ids.py` | Identifiers, derived from content so a replay reproduces them |
 | `codec.py` | Turning events into text and back, without losing precision |
 | `intent.py` | What a strategy proposes: a side and where the idea is wrong |
