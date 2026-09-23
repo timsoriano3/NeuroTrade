@@ -35,11 +35,19 @@ system must make the identical decisions, down to the byte. That is the only way
 to tell whether a change improved things or just moved them. This one already
 works — `make verify-replay` replays a recorded session twice and compares.
 
+**The measurement itself gets tested.** A validation harness that says yes to
+noise is worse than none, and one that says no to everything is indistinguishable
+from a working one until it throws a real strategy away. `make verify-lab` runs
+two control strategies whose answers are known in advance — one searched over
+data with nothing in it, one with a planted edge — and fails unless the lab
+rejects the first and accepts the second.
+
 ## What exists today
 
 The foundations — the vocabulary the rest of the system is written in, the
 storage it runs on, the machinery that proves a session replays exactly, and the
-broker connection it trades through. 810 tests.
+broker connection it trades through, and the research lab that decides whether a
+result means anything. 1,716 tests.
 
 | Area | What it does |
 |---|---|
@@ -53,6 +61,9 @@ broker connection it trades through. 810 tests.
 | **Event bus** | Delivers events to whatever is listening, in a fixed order — the reason two runs behave identically |
 | **Replay** | Re-runs a recorded session and proves it behaved the same, by hashing everything that happened |
 | **Broker** | Connects to Interactive Brokers, pulls historical bars within their rate limits, and places orders — with a structural guard that refuses real ones outside the live profile |
+| **Features** | Indicators and session reference levels, each declaring how much history it needs, and structurally unable to read a bar from after the moment being modelled |
+| **Labelling** | What a trade would actually have been worth: profit target, stop and time limit, with trading costs charged inside rather than subtracted afterwards |
+| **Validation** | Cross-validation that accounts for trades overlapping in time, and significance tests that charge a result for the size of the search that found it — proven against controls with known answers |
 
 Free intraday samples from FirstRateData and Kibot are seeded with
 `make seed`, and daily bars for the whole universe — Canadian listings included

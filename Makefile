@@ -186,6 +186,10 @@ verify-replay: ## Prove gate G1: replay twice, compare digests. SESSION= or LOG=
 	 if [ "$$first" = "$$second" ]; then echo '  ✓ deterministic'; \
 	 else echo '  ✗ DIGESTS DIFFER — replay is not deterministic'; exit 1; fi
 
+verify-lab: ## Prove gate G3: the lab rejects a snooped result, accepts a real one. [SEED= BARS=]
+	@$(PY) neurotrade --profile $(PROFILE) lab verify \
+	   $(if $(SEED),--seed $(SEED),) $(if $(BARS),--bars $(BARS),)
+
 # ── Housekeeping ─────────────────────────────────────────────
 clean: ## Remove build and tool caches. Never touches data/.
 	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage dist build

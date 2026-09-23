@@ -76,6 +76,7 @@ from neurotrade.ingest.actions import fetch_actions, scan_gaps
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
 from neurotrade.ingest.quality import audit_corpus, summarise
 from neurotrade.ingest.universe_history import LiquidityFloor, ScreenRules, screen_universe
+from neurotrade.lab.gate import DEFAULT_SEED, run_exit_gate
 from neurotrade.lab.replay import ReplayEngine
 from neurotrade.logs import configure, get_logger
 
@@ -145,6 +146,9 @@ app.add_typer(actions_app, name="actions")
 
 corpus_app = typer.Typer(help="Corpus quality gate.", no_args_is_help=True)
 app.add_typer(corpus_app, name="corpus")
+
+lab_app = typer.Typer(help="The research lab's own gate.", no_args_is_help=True)
+app.add_typer(lab_app, name="lab")
 
 
 @app.callback()
@@ -1508,6 +1512,59 @@ def corpus_check(
         typer.echo(report.survivorship.describe(), err=True)
     typer.echo(report.describe())
     if not report.clean:
+        raise typer.Exit(code=1)
+
+
+@lab_app.command("verify")
+def lab_verify(
+    ctx: typer.Context,
+    seed: Annotated[
+        int,
+        typer.Option("--seed", help="Seed for both synthetic control series."),
+    ] = DEFAULT_SEED,
+    bars: Annotated[
+        int,
+        typer.Option("--bars", help="Length of each synthetic series."),
+    ] = 3_000,
+) -> None:
+    """Prove gate G3: the lab rejects a snooped result and accepts a real one.
+
+    Runs two controls whose verdicts are known before the lab sees them. The
+    overfit control searches seventy moving-average variants over a random walk
+    with the drift removed, so there is nothing there to find; the honest
+    control runs four pre-declared variants over a series with a planted edge.
+    The lab has to turn the first down and let the second through.
+
+    The second half is not decoration. A gate built only on the rejection is
+    passed by a lab that rejects everything, and a validation harness that
+    never says yes is indistinguishable from a broken one until a real strategy
+    is thrown away by it.
+
+    The digest goes to stdout alone, as `replay` does, so two runs can be
+    compared directly; the table goes to stderr. Exits 1 if either verdict came
+    back wrong.
+
+    Example:
+        $ neurotrade lab verify
+        $ neurotrade lab verify --seed 7
+    """
+    del ctx  # the controls are synthetic: nothing here reads the corpus or config
+
+    report = run_exit_gate(seed=seed, n_bars=bars)
+
+    typer.echo(f"seed {report.seed}, {bars} bars per control", err=True)
+    for outcome in (report.overfit, report.honest):
+        typer.echo(f"  {outcome}", err=True)
+        paths = ", ".join(f"{value:+.3f}" for value in outcome.path_sharpes)
+        typer.echo(f"           cpcv paths: {paths}", err=True)
+
+    for problem in report.failures:
+        typer.echo(f"  ✗ {problem}", err=True)
+    if report.passed:
+        typer.echo("  ✓ the lab rejected the snoop and accepted the edge", err=True)
+
+    typer.echo(report.digest())
+    if not report.passed:
         raise typer.Exit(code=1)
 
 

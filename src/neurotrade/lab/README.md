@@ -16,9 +16,8 @@ difference.
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
 | `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
 | `trials.py` | The ledger the deflation counts against — every hypothesis tested, by anything |
-
-Still ahead: the exit gate — a deliberately overfit control strategy the lab
-has to reject.
+| `controls.py` | Two strategies and two synthetic series whose verdicts are known before the lab sees them |
+| `gate.py` | Gate G3 — runs both controls and fails if either verdict comes back wrong |
 
 ## Why three modules and not one
 
@@ -63,6 +62,59 @@ The useful part is that the digest covers **outputs as well as inputs**. Once
 strategies exist, a strategy that starts deciding differently changes the digest
 even though the recorded data is untouched. So "did that change alter
 behaviour?" becomes a yes/no question instead of an afternoon of diffing logs.
+
+## The exit gate, and why there are two controls
+
+§13's exit gate for Phase 1 asks for one thing: *the lab correctly rejects a
+deliberately overfit control strategy*. Taken literally that is passed by a lab
+that rejects everything, and a harness that never says yes is indistinguishable
+from a working one right up until it throws away a real strategy — which files
+no complaint. So `gate.py` runs two controls, and the verdicts have to differ.
+
+```bash
+make verify-lab                 # both controls, the default seed
+make verify-lab SEED=7          # any other
+```
+
+| Control | Data | Search | Must be |
+|---|---|---|---|
+| **overfit** | random walk, drift removed | 70 crossover variants, both directions | REJECTED |
+| **honest** | planted persistent drift | 4 variants, declared a priori | ACCEPTED |
+
+Both travel the identical path — `Strategy.on_bar` → intents → triple-barrier
+labels with costs inside → trial ledger → CPCV → deflated Sharpe. Only the data
+and the size of the search differ, which is what makes the comparison mean
+something.
+
+Two details in the construction carry most of the weight:
+
+**The walk is demeaned, not merely zero-drift in expectation.** Any one
+realisation finishes somewhere, and a directional rule aligned with where it
+finished wins in every subsample of it. That is a *stable* ranking, so the
+overfitting statistics report a clean result and are right to.
+
+**The snooped grid holds each variant and its mirror.** Thirty-five window pairs
+on one series are highly correlated, so the best of them is barely luckier than
+the median. Pairing each with a "fade" variant whose returns are its negative
+lets the search pick a *sign* by luck, which is the textbook snoop.
+
+## PBO is reported here, and does not vote
+
+The verdict rests on the deflated Sharpe alone. Over ten seeds, DSR ran
+0.000–0.220 on the overfit control against 1.000 on the honest one. PBO over the
+same seeds ran 0.000–0.886 and 0.057–0.529 — two distributions that almost
+entirely overlap, so any threshold placed between them would be fitted to
+whichever seed happened to be tried first.
+
+That is CSCV behaving correctly, not a bug in it. PBO is a property of the
+**search**, not of the winning strategy. The snooped grid carries a systematic
+ranking that has nothing to do with luck — turnover differs by window pair, so
+cost does too, and a cost-driven ranking is stable across every subsample. And
+the honest control's four near-equivalent rules on one series are close to
+arbitrary to rank, so PBO lands near 0.5 whatever the strategy is worth.
+
+The number is still printed, because it is worth seeing and §8 asks for it. It
+is simply not the instrument that separates these two controls.
 
 ## What the lab may depend on
 
