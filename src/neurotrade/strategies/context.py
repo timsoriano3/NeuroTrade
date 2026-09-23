@@ -32,6 +32,14 @@ calendar's open is a real UTC instant for that date), venues that open at the
 same local time in a different zone, and half days, where the window is clipped
 by an early close instead of running past it.
 
+**Session levels are kept for every instrument, and declared by nobody.** §5.3
+treats the opening range, session VWAP and the prior close as shared
+infrastructure; they cost one fold per bar and are anchored to the session
+rather than to a window, so there is no history to load and nothing to declare.
+The tracker is fed from `observe`, which only ever sees bars that have already
+closed — so unlike the plain functions in `features/levels.py`, this path cannot
+be handed a bar from after the decision moment.
+
 **Feature values are resolved per strategy, from what it declared.** The union
 of every declared feature is computed once per bar, then projected down to each
 strategy's own declarations — so the work is shared but the visibility is not.
@@ -51,6 +59,7 @@ from neurotrade.core.clock import Nanos, to_datetime
 from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.ports import CalendarPort
 from neurotrade.core.types import Symbol, Venue
+from neurotrade.features.levels import SessionLevelTracker
 from neurotrade.features.registry import FeatureRegistry, FeatureSpec
 from neurotrade.features.resolver import FeatureResolver
 from neurotrade.strategies.base import Regime, Strategy, StrategyContext
@@ -164,9 +173,11 @@ class MarketContext:
         "_key",
         "_regime_source",
         "_resolver",
+        "_session_now",
         "_sessions",
         "_specs",
         "_started",
+        "_tracker",
         "_values",
     )
 
@@ -195,8 +206,10 @@ class MarketContext:
         self._specs: dict[str, FeatureSpec] = {}
         self._resolver = FeatureResolver({}, interval=interval)
         self._sessions: dict[tuple[Venue, date], TradingSession | None] = {}
+        self._tracker = SessionLevelTracker()
         self._key: tuple[Symbol, Nanos] | None = None
         self._values: dict[str, float | None] = {}
+        self._session_now: TradingSession | None = None
         self._started = False
 
     def declare(self, strategy: Strategy) -> None:
@@ -242,11 +255,13 @@ class MarketContext:
         return self._resolver.lookback
 
     def observe(self, bar: Bar) -> None:
-        """Advance the history and resolve every declared feature for this bar.
+        """Advance every running total this context keeps, for one bar.
 
-        Called once per bar, before any strategy is asked for its view of it.
+        Called once per bar, before any strategy is asked for its view of it:
+        the feature windows, the session levels and the session lookup all
+        happen here, so the per-strategy call is a projection and nothing more.
         Re-observing the same instrument and instant is a no-op, so a duplicate
-        bar in the corpus cannot enter a feature window twice.
+        bar in the corpus cannot enter a window or a VWAP twice.
 
         Args:
             bar: The bar that just closed.
@@ -260,6 +275,8 @@ class MarketContext:
         self._started = True
         self._resolver.observe(bar)
         self._values = self._resolver.resolve(bar)
+        self._session_now = self._session_for(bar)
+        self._tracker.update(bar, self._session_now)
         self._key = key
 
     def __call__(self, bar: Bar, strategy: Strategy) -> StrategyContext:
@@ -289,7 +306,7 @@ class MarketContext:
                 raise ValueError(
                     f"{strategy.qualified_name} was never declared to this context"
                 ) from None
-        session = self._session_for(bar)
+        session = self._session_now
         return StrategyContext(
             symbol=bar.symbol,
             # The close, never the open: a context stamped earlier would let a
@@ -298,6 +315,7 @@ class MarketContext:
             session=market_phase(session, bar.ts_event),
             regime=self._regime_source(session, bar.ts_event),
             values=values,
+            levels=self._tracker.levels(bar.symbol),
         )
 
     def _session_for(self, bar: Bar) -> TradingSession | None:

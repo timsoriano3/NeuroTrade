@@ -13,7 +13,7 @@ filtering out the proposals that will not work.
 | File | What it does |
 |---|---|
 | `base.py` | The contract every strategy implements, and the registry that holds them |
-| `context.py` | Fills in what a strategy may see: venue phase, regime, resolved features |
+| `context.py` | Fills in what a strategy may see: venue phase, regime, features, session levels |
 
 No strategies are implemented yet. The first two arrive in Phase 2: an opening-
 range breakout, and one that trades a stock's movement relative to the market.
@@ -31,6 +31,14 @@ everyone to remember.
 A strategy also cannot read a feature it did not declare. The engine only
 prepares what was asked for, so an undeclared one would be missing or computed
 over the wrong window, and neither is visible in the number itself.
+
+The session anchors are the one thing nobody declares: where the session opened,
+how far it has travelled, the volume-weighted average price, the opening ranges
+that have completed, and yesterday's close. §5.3 calls them shared
+infrastructure feeding every other strategy, they cost one fold per bar, and
+there is no history to load for them — so there is nothing for a declaration to
+tell the host. They arrive whether or not anything asked, and they are `None`
+before the session's first bar rather than half-filled.
 
 ## Market conditions gate what may run
 

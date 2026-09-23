@@ -7,12 +7,16 @@ trading a level nobody else is watching is the refusal to build one.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
+from neurotrade.core.calendar import TradingSession
 from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.types import Price, Quantity, Symbol, Venue
 from neurotrade.features.levels import (
     OpeningRange,
+    SessionLevelTracker,
     opening_range,
     session_vwap,
     vwap_distance,
@@ -174,3 +178,145 @@ def test_vwap_is_quantized_to_a_storable_price() -> None:
     found = session_vwap(bars)
     assert found is not None
     assert -found.value.as_tuple().exponent <= 8  # type: ignore[operator]
+
+
+# ── SessionLevelTracker ──────────────────────────────────────────────────────
+
+MSFT = Symbol("MSFT", Venue.NASDAQ)
+
+
+def session(day: int, *, first_minute: int, minutes: int = 390) -> TradingSession:
+    """A session opening at `first_minute - 1` so bar `first_minute` is its first."""
+    open_ns = (first_minute - 1) * MINUTE
+    return TradingSession(
+        venue=Venue.NASDAQ,
+        session_date=date(2024, 7, day),
+        open_ns=open_ns,
+        close_ns=open_ns + minutes * MINUTE,
+        is_early_close=False,
+    )
+
+
+def fold(tracker: SessionLevelTracker, bars: list[Bar], day: TradingSession) -> None:
+    for one in bars:
+        tracker.update(one, day)
+
+
+def test_nothing_is_reported_before_the_first_bar() -> None:
+    assert SessionLevelTracker().levels(AAPL) is None
+
+
+def test_a_bar_outside_any_session_is_not_folded_in() -> None:
+    """An RTH corpus has none; one would put after-hours prints in a session VWAP."""
+    tracker = SessionLevelTracker()
+    tracker.update(bar(1, "100"), None)
+    assert tracker.levels(AAPL) is None
+
+
+def test_the_open_is_the_first_bars_open_not_its_close() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "101", high="102", low="99"), bar(2, "103")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert str(levels.session_open) == "101"
+
+
+def test_high_and_low_run_across_the_session() -> None:
+    tracker = SessionLevelTracker()
+    fold(
+        tracker,
+        [bar(1, "100", high="101", low="99"), bar(2, "100", high="105", low="95")],
+        session(8, first_minute=1),
+    )
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert (str(levels.high), str(levels.low)) == ("105", "95")
+
+
+def test_the_running_vwap_agrees_with_the_batch_function() -> None:
+    """One implementation: the streaming fold and `session_vwap` cannot diverge."""
+    bars = [bar(i, str(100 + i), volume=str(100 * i)) for i in range(1, 8)]
+    tracker = SessionLevelTracker()
+    fold(tracker, bars, session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert levels.vwap == session_vwap(bars)
+
+
+def test_a_zero_volume_bar_does_not_move_the_vwap() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100"), bar(2, "200", volume="0")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert str(levels.vwap) == "100"
+
+
+def test_an_opening_range_appears_on_the_bar_that_completes_it() -> None:
+    tracker = SessionLevelTracker()
+    day = session(8, first_minute=1)
+    bars = [bar(i, "100", high=str(100 + i), low=str(100 - i)) for i in range(1, 6)]
+    for index, one in enumerate(bars, start=1):
+        tracker.update(one, day)
+        levels = tracker.levels(AAPL)
+        assert levels is not None
+        assert (levels.opening_range(5) is None) == (index < 5)
+    final = tracker.levels(AAPL)
+    assert final is not None
+    assert final.opening_range(5) == OpeningRange(high=Price("105"), low=Price("95"), bar_count=5)
+
+
+def test_an_untracked_opening_window_is_refused() -> None:
+    """Each window is a separate trial; a silent None would hide a typo."""
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    with pytest.raises(ValueError, match=r"opening range 7 is not tracked"):
+        levels.opening_range(7)
+
+
+def test_a_new_session_resets_everything_but_the_prior_close() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100", high="110", low="90")], session(8, first_minute=1))
+    fold(tracker, [bar(400, "50", high="51", low="49")], session(9, first_minute=400))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert (str(levels.high), str(levels.low), str(levels.prior_close)) == ("51", "49", "100")
+
+
+def test_the_first_session_seen_has_no_prior_close() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert (levels.prior_close, levels.gap) == (None, None)
+
+
+def test_the_gap_is_signed_and_relative() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100")], session(8, first_minute=1))
+    fold(tracker, [bar(400, "99", high="99", low="99")], session(9, first_minute=400))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert levels.gap == pytest.approx(-0.01)
+
+
+def test_symbols_do_not_share_levels() -> None:
+    tracker = SessionLevelTracker()
+    day = session(8, first_minute=1)
+    tracker.update(bar(1, "100"), day)
+    other = Bar(
+        symbol=MSFT,
+        ts_event=MINUTE,
+        ts_init=MINUTE,
+        interval=BarInterval.MIN_1,
+        open=Price("200"),
+        high=Price("200"),
+        low=Price("200"),
+        close=Price("200"),
+        volume=Quantity(100),
+    )
+    tracker.update(other, day)
+    aapl, msft = tracker.levels(AAPL), tracker.levels(MSFT)
+    assert aapl is not None and msft is not None
+    assert (str(aapl.close), str(msft.close)) == ("100", "200")

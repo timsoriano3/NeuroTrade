@@ -78,7 +78,7 @@ def test_context_exposes_no_history_clock_or_broker() -> None:
     lets a strategy bypass the risk engine entirely.
     """
     exposed = {f.name for f in fields(StrategyContext)}
-    assert exposed == {"symbol", "as_of", "session", "regime", "values"}
+    assert exposed == {"symbol", "as_of", "session", "regime", "values", "levels"}
     assert not exposed & {"history", "bars", "clock", "broker", "portfolio"}
 
 

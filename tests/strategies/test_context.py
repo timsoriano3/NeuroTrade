@@ -290,3 +290,47 @@ def test_a_bar_after_utc_midnight_finds_its_own_session() -> None:
     late = bar(utc(21, 0, date(2024, 11, 5)))
     context.observe(late)
     assert context(late, Reader()).session is MarketSession.REGULAR
+
+
+# ── Session levels ───────────────────────────────────────────
+
+JULY_9 = TradingSession(
+    venue=Venue.NASDAQ,
+    session_date=date(2024, 7, 9),
+    open_ns=utc(13, 30, date(2024, 7, 9)),
+    close_ns=utc(20, 0, date(2024, 7, 9)),
+    is_early_close=False,
+)
+
+
+def test_levels_are_supplied_without_being_declared() -> None:
+    """§5.3 shared infrastructure: no `FeatureRef` names them, everyone gets them."""
+    context = context_over(FULL_DAY)
+    context.declare(Reader())
+    context.observe(bar(utc(14, 0), "101"))
+    levels = context(bar(utc(14, 0), "101"), Reader()).levels
+    assert levels is not None
+    assert (str(levels.session_open), levels.bar_count) == ("101", 1)
+
+
+def test_levels_are_absent_outside_a_session() -> None:
+    """A CLOSED bar must not put an after-hours print into a session VWAP."""
+    context = context_over(FULL_DAY)
+    context.declare(Reader())
+    context.observe(bar(utc(11, 0)))
+    assert context(bar(utc(11, 0)), Reader()).levels is None
+
+
+def test_levels_reset_at_the_next_session_and_carry_the_prior_close() -> None:
+    context = MarketContext(features=library(), calendar=Calendar(FULL_DAY, JULY_9))
+    context.declare(Reader())
+    for one in (bar(utc(14, 0), "100"), bar(utc(14, 0, date(2024, 7, 9)), "80")):
+        context.observe(one)
+    last = bar(utc(14, 0, date(2024, 7, 9)), "80")
+    levels = context(last, Reader()).levels
+    assert levels is not None
+    assert (levels.session_date, str(levels.prior_close), levels.bar_count) == (
+        date(2024, 7, 9),
+        "100",
+        1,
+    )

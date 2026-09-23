@@ -15,15 +15,25 @@ is not the software trading your money.
 | `registry.py` | Registering a feature, and the rules every feature obeys |
 | `indicators.py` | The registered features: log return, ATR, realised volatility, relative volume, EMA, fractionally differenced close |
 | `resolver.py` | The rolling per-symbol window a feature is computed from |
-| `levels.py` | Session-anchored reference levels — opening range, session VWAP, distance from it. Plain functions, not registered |
+| `levels.py` | Session-anchored reference levels — opening range, session VWAP, prior close, the gap. Plain functions plus the tracker that keeps them current |
 
 **Why `levels.py` sits outside the registry.** A registered feature declares a
 fixed lookback and is handed exactly that many bars. A level anchored to the
 session open has no fixed bar count — the distance from the open changes every
 minute — so there is nothing to declare. §5.3 already treats these as separate
 "shared infrastructure", so the split follows the spec rather than working
-around it. The cost is that the lookahead guard does not apply to them: pass
-bars up to the decision moment and no further.
+around it.
+
+That leaves the lookahead guard not applying to the plain functions: pass bars
+up to the decision moment and no further. **`SessionLevelTracker` is the
+answer to that**, and it is what the engine actually uses. Bars are folded in
+one at a time as they close, so there is no window to pass and no way to pass
+one reaching past the decision moment. The batch functions remain for tests and
+one-off analysis; the two cannot disagree, because the rule for what a bar
+contributes to a VWAP lives in `vwap_contribution` and both call it.
+
+A tracked level resets at the session boundary. Only the prior close survives
+it — which is the one thing that is *about* the boundary.
 
 **Who keeps the history.** A `FeatureSpec` is handed a window and remembers
 nothing, so something has to hold the bars. `resolver.py` does, per symbol, and

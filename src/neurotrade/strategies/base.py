@@ -18,6 +18,14 @@ documentation — the engine resolves exactly those, and `StrategyContext.featur
 refuses any name a strategy did not declare. A strategy therefore cannot quietly
 start depending on something the engine is not loading history for.
 
+**Session levels are the exception, and are not declared.** §5.3 calls the
+opening range, session VWAP and the prior close "shared infrastructure feeding
+every other strategy": they are anchored to an event rather than to a window,
+they cost nothing to keep current, and they are maintained for every instrument
+whether or not anything asked. Declaration exists so that the host knows what
+history to load; there is no history to load for these, so there is nothing to
+declare.
+
 **Regime gating is a permission, not a preference.** §5.7 has the regime
 classifier decide which strategy families may fire at all. An ORB strategy and
 an ORB-fade strategy are opposites and must never be live together; declaring
@@ -38,6 +46,7 @@ from neurotrade.core.events import Bar, MarketSession, Quote, TickTrade
 from neurotrade.core.intent import Intent
 from neurotrade.core.registry import Registry
 from neurotrade.core.types import Symbol
+from neurotrade.features.levels import SessionLevels
 
 __all__ = [
     "FeatureRef",
@@ -130,6 +139,11 @@ class StrategyContext:
     values: Mapping[str, float | None] = field(default_factory=dict)
     """Resolved feature values by name. `None` means still warming up — not
     zero, and not "no signal"."""
+
+    levels: SessionLevels | None = None
+    """Session anchors (§5.3) as of `as_of`: open, high, low, VWAP, completed
+    opening ranges, prior close. `None` before the session's first bar, and
+    outside a session — never a partially filled stand-in."""
 
     def feature(self, name: str) -> float | None:
         """Read a declared feature.
