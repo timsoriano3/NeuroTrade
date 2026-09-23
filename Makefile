@@ -94,6 +94,15 @@ ts-test:
 # ── Operations ───────────────────────────────────────────────
 PROFILE ?= research
 
+# Long crawls outlive a laptop's idle timer. `caffeinate -is` holds the machine
+# awake for exactly as long as the command it wraps, so there is no assertion
+# left behind to undo. Empty wherever caffeinate does not exist — Linux CI runs
+# these same targets and must not gain a missing-binary failure.
+#
+# Two limits worth knowing, because neither is caffeinate's to fix: `-s` is
+# ignored on battery, and nothing defeats clamshell sleep. Plugged in, lid open.
+SLEEPLESS := $(shell command -v caffeinate >/dev/null 2>&1 && echo 'caffeinate -is')
+
 show-config: ## Print the resolved config and its hash. PROFILE=research|paper|live
 	$(PY) neurotrade --profile $(PROFILE) config show
 
@@ -113,7 +122,7 @@ paper-smoke: ## Gate G2: submit a paper order, acknowledge, cancel
 # are optional.
 backfill: ## Fill the corpus from IBKR. START=YYYY-MM-DD [END= LIMIT= PASSES=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
-	$(PY) neurotrade --profile $(PROFILE) ibkr backfill --start $(START) \
+	$(SLEEPLESS) $(PY) neurotrade --profile $(PROFILE) ibkr backfill --start $(START) \
 	  $(if $(END),--end $(END)) $(if $(LIMIT),--limit $(LIMIT)) $(if $(PASSES),--passes $(PASSES))
 
 # Free vendor samples (§12.1 stage 2). `seed` does both halves; they are also
@@ -137,7 +146,7 @@ seed-ingest: ## Normalise a fetched snapshot into derived/seed. [SOURCE= SNAPSHO
 # silently decide how much history the corpus holds.
 daily: ## Fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
-	$(PY) neurotrade --profile $(PROFILE) daily backfill --start $(START) \
+	$(SLEEPLESS) $(PY) neurotrade --profile $(PROFILE) daily backfill --start $(START) \
 	  $(if $(END),--end $(END)) $(if $(LIMIT),--limit $(LIMIT))
 
 # Point-in-time membership over the daily corpus (§12.1 stage 3, second half).
@@ -146,7 +155,7 @@ daily: ## Fill the daily-bar corpus from Yahoo. START=YYYY-MM-DD [END= LIMIT=]
 # reaches further back on its own for the trailing window.
 universe: ## Build point-in-time universe membership. START=YYYY-MM-DD [END=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
-	$(PY) neurotrade --profile $(PROFILE) universe build --start $(START) \
+	$(SLEEPLESS) $(PY) neurotrade --profile $(PROFILE) universe build --start $(START) \
 	  $(if $(END),--end $(END))
 
 # Corporate actions and the adjustment audit (§12.1 stage 5). `actions` fetches
@@ -155,7 +164,7 @@ universe: ## Build point-in-time universe membership. START=YYYY-MM-DD [END=]
 # recorded action explains.
 actions: ## Fetch splits and dividends from Yahoo. START=YYYY-MM-DD [END=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
-	$(PY) neurotrade --profile $(PROFILE) actions fetch --start $(START) \
+	$(SLEEPLESS) $(PY) neurotrade --profile $(PROFILE) actions fetch --start $(START) \
 	  $(if $(END),--end $(END))
 
 actions-check: ## Audit the daily corpus for unexplained gaps. START=YYYY-MM-DD [END= THRESHOLD=]
