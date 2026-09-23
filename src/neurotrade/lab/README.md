@@ -11,7 +11,10 @@ difference.
 
 | File | What it does |
 |---|---|
+| `drive.py` | The loop both runners share: clock, bus, run digest |
 | `replay.py` | Replays a recorded session and proves the replay was faithful |
+| `feed.py` | The corpus as one ts-ordered bar stream, merged across a universe |
+| `engine.py` | Runs strategies over that stream and collects their intents |
 | `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
 | `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
@@ -57,6 +60,38 @@ the same contents down to the last decimal.
 ```bash
 make verify-replay          # replays twice, compares digests
 ```
+
+## One loop, two sources
+
+A replay and a backtest are the same machine fed from different places. The loop
+lives in `drive.py`; `replay.py` points it at a recorded event log and
+`engine.py` points it at the corpus through `feed.py`. Nothing else differs —
+same bus, same `SimClock`, same digest.
+
+That is §3.6's one-implementation rule turned on the lab itself. Two loops could
+drift in the way that matters most: a difference in when the clock moves, or in
+what gets hashed, would make a backtest result unreproducible by a replay of the
+same session. `test_drive.py` pins it — the same bars through both engines must
+produce the same digest.
+
+Merging is ordered by `(ts_event, seq, symbol)` rather than time alone. At
+one-minute bars every instrument closes on the same tick, so a time-only sort
+would leave the order of a tie to whichever iterator the heap popped first, and
+determinism would fail every minute of every session.
+
+**Intents are published, not returned.** A strategy's proposals go back on the
+bus, so they enter the digest next to the bars that caused them — a strategy
+that changes its mind changes the digest even when the input data is identical.
+
+**What does not happen here:** fills. An intent is a proposal (§5.1); what
+becomes of it is `labelling.py`'s triple barrier, not a fill simulator. One
+place decides how a position resolves, and it is the place the labels come from.
+
+Two seams are stubbed until their own commits land — market session and regime,
+and feature resolution. Both are `default_context`, which grants nothing. Since
+`Strategy.regimes` defaults to `()` and `Regime.UNKNOWN` grants nothing, a real
+strategy does not fire under it at all. That is the safe direction to fail, and
+it is why an early run coming back empty is correct rather than broken.
 
 The useful part is that the digest covers **outputs as well as inputs**. Once
 strategies exist, a strategy that starts deciding differently changes the digest

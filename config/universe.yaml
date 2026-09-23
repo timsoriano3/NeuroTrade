@@ -57,9 +57,37 @@ venues:
     - WMT
     - XOM
 
+  # Index and sector proxies. These are not trading candidates in their own
+  # right — they are the REGRESSORS §5.4's beta-adjusted relative strength and
+  # §5.5's index-relative residual reversion need. Both regress a name's
+  # intraday return on the market plus its sector; without the sector leg the
+  # residual still carries sector beta, which is the very thing those
+  # strategies exist to strip out.
+  #
+  # The eleven SPDRs are the GICS sectors. They are used rather than per-name
+  # GICS membership because they are tradable (so the residual is hedgeable),
+  # and because point-in-time GICS history is licensed and would have to be
+  # reconstructed from present-day membership — which is survivorship bias
+  # wearing a classification's clothes.
   ARCA:
+    - DIA # Dow proxy; also in the seed corpus, so it cross-checks FRD's bars
+    - EEM # also in the seed corpus, same reason
     - IWM
     - SPY
+    - XLB # materials
+    - XLC # communication services
+    - XLE # energy
+    - XLF # financials
+    - XLI # industrials
+    - XLK # technology
+    - XLP # consumer staples
+    - XLRE # real estate
+    - XLU # utilities
+    - XLV # health care
+    - XLY # consumer discretionary
+
+  BATS:
+    - VXX # volatility regime input (§5.7); Cboe BZX listing, which IBKR calls BATS
 
   TSX:
     - ABX
@@ -76,3 +104,6 @@ venues:
     - SU
     - T # Telus. NYSE's "T" is AT&T — a different company, same ticker
     - TD
+    - XIU # iShares S&P/TSX 60. The Canadian market leg: SPY does not price TSX
+      # names, so without this the fourteen Canadian listings have nothing to
+      # residualise against.

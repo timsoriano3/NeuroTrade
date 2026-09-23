@@ -5,22 +5,17 @@ live system uses, under a simulated clock, and get the identical result — ever
 time, on every machine. A replay that could not be trusted to reproduce would
 make every diagnosis of a live/backtest divergence a guess.
 
-**The run digest is the proof.** It is a rolling hash over every event the bus
-dispatched, in dispatch order. Two runs agree only if they saw the same events,
-in the same order, with the same contents down to the last decimal. Comparing
-digests turns "did that change alter behaviour?" into a yes/no question instead
-of an afternoon of diffing logs.
+**The run digest is the proof.** Two runs agree only if they saw the same
+events, in the same order, with the same contents down to the last decimal.
+Comparing digests turns "did that change alter behaviour?" into a yes/no
+question instead of an afternoon of diffing logs. It covers **outputs as well as
+inputs**, so once strategies exist their intents enter the digest for free — and
+a strategy that starts making different decisions changes the digest even though
+the input data is untouched. That is the whole point.
 
-Crucially the digest covers **outputs as well as inputs**. It hashes everything
-published, so once strategies exist their intents enter the digest for free —
-and a strategy that starts making different decisions changes the digest even
-though the input data is untouched. That is the whole point.
-
-**The clock leads each event.** Before an event is dispatched, the `SimClock` is
-moved to that event's `ts_event`, so anything reading the clock during dispatch
-sees the moment being modelled rather than the moment the replay is running.
-Because `SimClock` refuses to move backwards, a store that yielded events out of
-order fails here rather than producing quietly wrong output.
+**The loop itself lives in `drive.py`**, shared with `BacktestEngine`. What is
+left here is only what makes a replay a replay: its source is the recorded event
+log rather than the corpus.
 
 **Nothing here reaches an adapter.** The engine takes an `EventStorePort`, so a
 replay can run against a file, a fixture, or an in-memory list without changing.
@@ -28,98 +23,17 @@ replay can run against a file, a fixture, or an in-memory list without changing.
 
 from __future__ import annotations
 
-import hashlib
-from dataclasses import dataclass
-
 from neurotrade.bus import EventBus
 from neurotrade.core.clock import Nanos, SimClock
-from neurotrade.core.codec import CODEC_VERSION, codec
 from neurotrade.core.events import Event
 from neurotrade.core.ports import EventStorePort
+from neurotrade.lab.drive import RunDigest, RunResult, drive
 
 __all__ = ["ReplayEngine", "ReplayResult", "RunDigest"]
 
-
-class RunDigest:
-    """A rolling hash over every event a bus dispatches.
-
-    Used as a bus subscriber, so it observes exactly what the handlers observed,
-    in the order they observed it.
-
-    BLAKE2b rather than Python's `hash()` for the same reason identifiers use it:
-    `hash()` is salted per process, so a digest built with it would differ
-    between two runs of the same program and prove nothing.
-
-    Example:
-        >>> digest = RunDigest()
-        >>> digest(a_bar)
-        >>> len(digest.hexdigest)
-        32
-    """
-
-    __slots__ = ("_count", "_hash")
-
-    def __init__(self) -> None:
-        self._hash = hashlib.blake2b(digest_size=16)
-        # Seeded with the codec version so that two digests are only ever
-        # compared when the encoding behind them is the same. A codec change
-        # alters every digest, which is correct — the bytes really did change.
-        self._hash.update(f"codec={CODEC_VERSION}\n".encode())
-        self._count = 0
-
-    def __call__(self, event: Event) -> None:
-        """Fold one event into the digest. Signature matches `Handler`."""
-        self._hash.update(codec.dumps(event).encode("utf-8"))
-        self._hash.update(b"\n")
-        self._count += 1
-
-    @property
-    def hexdigest(self) -> str:
-        """The digest so far, as hex.
-
-        Example:
-            >>> a, b = RunDigest(), RunDigest()
-            >>> a(a_bar); b(a_bar)
-            >>> a.hexdigest == b.hexdigest
-            True
-        """
-        return self._hash.hexdigest()
-
-    @property
-    def count(self) -> int:
-        """How many events have been folded in."""
-        return self._count
-
-    def __repr__(self) -> str:
-        return f"RunDigest({self._count} events, {self.hexdigest[:12]}…)"
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayResult:
-    """What a replay produced.
-
-    Deliberately holds no timing. Wall-clock duration is useful to report and
-    must never enter a comparison — it varies between runs for reasons that have
-    nothing to do with behaviour, and a "digest" including it would never match.
-    """
-
-    digest: str  # rolling hash over every dispatched event, in order
-    events_read: int  # events taken from the store
-    events_dispatched: int  # events the bus delivered, including any reactions
-    first_ts: Nanos | None  # earliest ts_event seen; None if the range was empty
-    last_ts: Nanos | None  # latest ts_event seen
-
-    @property
-    def is_empty(self) -> bool:
-        """Whether the replay found anything to do."""
-        return self.events_read == 0
-
-    @property
-    def span_ns(self) -> int:
-        """Simulated time covered, in nanoseconds. Zero for an empty replay."""
-        if self.first_ts is None or self.last_ts is None:
-            return 0
-        return self.last_ts - self.first_ts
+#: What a replay produced. The same record a backtest produces, because a replay
+#: and a backtest differ only in where their events came from.
+ReplayResult = RunResult
 
 
 class ReplayEngine:
@@ -204,27 +118,11 @@ class ReplayEngine:
             >>> (result.events_read, result.first_ts)
             (1, 1000)
         """
-        read = 0
-        first_ts: Nanos | None = None
-        last_ts: Nanos | None = None
-
-        for event in self._store.stream(start, end):
-            # Clock first: a handler reading the clock must see the moment being
-            # modelled, not the moment the replay happens to be running.
-            self._clock.set_time_ns(event.ts_event)
-            self._bus.publish(event)
-
-            read += 1
-            if first_ts is None:
-                first_ts = event.ts_event
-            last_ts = event.ts_event
-
-        return ReplayResult(
-            digest=self._digest.hexdigest,
-            events_read=read,
-            events_dispatched=self._digest.count,
-            first_ts=first_ts,
-            last_ts=last_ts,
+        return drive(
+            self._store.stream(start, end),
+            clock=self._clock,
+            bus=self._bus,
+            digest=self._digest,
         )
 
     def __repr__(self) -> str:
