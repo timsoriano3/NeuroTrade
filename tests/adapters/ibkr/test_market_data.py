@@ -389,6 +389,23 @@ async def test_a_refused_range_costs_no_pacing_quota() -> None:
     assert feed.pacer.in_window == 0
 
 
+async def test_the_crawlers_widest_window_is_one_request_not_a_refusal() -> None:
+    """The joint the backfill's windowing rests on.
+
+    `plan_windows` caps a window at 30 calendar days and the crawler shifts
+    both bounds by a nanosecond, so the widest range this adapter can be handed
+    runs from one session's open to the close 29 days later. If that rounded up
+    to 31 days the whole crawl would refuse every full window, and the failure
+    would only appear against a live Gateway.
+    """
+    feed, ib = a_feed(bars=[a_bar(0)])
+    thirty_days = OPEN_NS + 29 * 86_400 * 1_000_000_000 + 390 * MINUTE
+
+    await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS + 1, thirty_days + 1)
+
+    assert ib.historical_calls[0]["durationStr"] == "30 D"
+
+
 async def test_daily_bars_may_cover_years() -> None:
     """The limit is per bar size: a decade of daily bars is one request."""
     feed, _ = a_feed(bars=[a_bar(0)])

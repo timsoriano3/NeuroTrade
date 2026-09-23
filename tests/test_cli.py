@@ -749,7 +749,7 @@ def test_extra_passes_stop_once_the_next_plan_is_empty(
     # One request to fill the only cell; the second pass finds an empty plan
     # and makes none.
     assert len(feed_log.calls) == 1
-    assert "passes    2, last planned 0 cells" in result.stderr
+    assert "passes    2, last planned 0 sessions in 0 requests" in result.stderr
 
 
 def test_a_dropped_vwap_is_reported_to_the_operator(
@@ -813,18 +813,19 @@ def test_a_pass_that_gives_up_exits_nonzero_and_runs_no_further_passes(
 
     assert result.exit_code == 1
     assert len(feed_log.calls) == 5
-    assert "passes    1, last planned 5 cells" in result.stderr
+    assert "passes    1, last planned 5 sessions in 5 requests" in result.stderr
     assert "stopped" in result.stderr
 
 
 # ── backfill: limit ───────────────────────────────────────────────
 
 
-def test_limit_bounds_the_cells_offered_but_not_the_plan_reported(
+def test_limit_bounds_the_requests_offered_but_not_the_plan_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Six cells exist here (2 symbols x 3 sessions). `--limit 1` must offer
-    only one to the feed, while `planned` still reports the whole plan."""
+    """Six instrument-sessions exist here (2 symbols x 3 sessions), grouped
+    into one 30-day window each. `--limit 1` must offer only one window to the
+    feed, while `planned` still reports the whole plan."""
     monkeypatch.setenv("NEUROTRADE_STORAGE__DATA_ROOT", str(tmp_path))
     universe_path = _write_universe(tmp_path, {"NASDAQ": ["AAPL", "MSFT"]})
     feed_log = _FeedLog()
@@ -847,7 +848,7 @@ def test_limit_bounds_the_cells_offered_but_not_the_plan_reported(
     )
 
     assert result.exit_code == 0
-    assert "passes    1, last planned 6 cells" in result.stderr
+    assert "passes    1, last planned 6 sessions in 2 requests" in result.stderr
     assert len(feed_log.calls) == 1
 
 

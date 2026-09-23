@@ -1,4 +1,4 @@
-"""Tests for the backfill crawler's fetch loop (`crawl` and `order_cells`).
+"""Tests for the backfill crawler's fetch loop (`crawl` and `order_windows`).
 
 `asyncio_mode = "auto"` (pyproject) lets these be plain `async def` tests; no
 `asyncio.run` or `@pytest.mark.asyncio` needed.
@@ -9,6 +9,11 @@ files a bar under the wrong instrument, never writes what fell outside the
 session, and gives up on a symbol — but not the whole pass — the moment that
 symbol looks broken. None of the fakes below import or subclass anything from
 `core.ports`; conformance is structural, same as in `test_backfill.py`.
+
+Many tests pass `window_days=1` on purpose: their subject is per-session
+behaviour — the skip after a failure, the breaker, the limit — and the default
+30-day window would fold MON, TUE and WED into a single request, testing the
+grouping instead of the thing named. The windowing itself has its own section.
 """
 
 from __future__ import annotations
@@ -24,8 +29,14 @@ from neurotrade.core.clock import Nanos, to_nanos
 from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.types import Price, Quantity, Symbol, Venue
 from neurotrade.core.universe import Universe
-from neurotrade.ingest.backfill import BackfillCell
-from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl, order_cells
+from neurotrade.ingest.backfill import BackfillCell, BackfillWindow
+from neurotrade.ingest.crawler import (
+    CellOutcome,
+    CellStatus,
+    CrawlReport,
+    crawl,
+    order_windows,
+)
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
 MSFT = Symbol("MSFT", Venue.NASDAQ)
@@ -138,36 +149,47 @@ class RecordingStore:
         return iter(())
 
 
-# ── order_cells ────────────────────────────────────────────────
+# ── order_windows ──────────────────────────────────────────────
 
 
-def test_untouched_cells_precede_short_ones_keeping_input_order_within_each_group() -> None:
-    """The sort is stable: within "untouched" and within "short" the original
-    (recency-major) order from `plan_backfill` must survive untouched."""
-    session_wed = _session(Venue.NASDAQ, WED)
-    session_tue = _session(Venue.NASDAQ, TUE)
-    session_mon = _session(Venue.NASDAQ, MON)
+def _window(symbol: Symbol, *days_and_held: tuple[date, int]) -> BackfillWindow:
+    """A window over `symbol`, one cell per (session date, bars held) pair."""
+    cells = tuple(
+        BackfillCell(
+            symbol=symbol,
+            session=_session(Venue.NASDAQ, day),
+            interval=BarInterval.MIN_1,
+            held_bars=held,
+        )
+        for day, held in days_and_held
+    )
+    return BackfillWindow(symbol=symbol, interval=BarInterval.MIN_1, cells=cells)
 
-    untouched_wed = BackfillCell(
-        symbol=AAPL, session=session_wed, interval=BarInterval.MIN_1, held_bars=0
-    )
-    short_tue = BackfillCell(
-        symbol=MSFT, session=session_tue, interval=BarInterval.MIN_1, held_bars=1
-    )
-    untouched_mon = BackfillCell(
-        symbol=MSFT, session=session_mon, interval=BarInterval.MIN_1, held_bars=0
-    )
-    short_wed = BackfillCell(
-        symbol=AAPL, session=session_wed, interval=BarInterval.MIN_1, held_bars=2
-    )
 
-    ordered = order_cells([untouched_wed, short_tue, untouched_mon, short_wed])
+def test_windows_with_untouched_sessions_precede_windows_of_only_short_ones() -> None:
+    """The sort is stable: within "has untouched" and within "all short" the
+    original (recency-major) order from `plan_windows` must survive."""
+    untouched_wed = _window(AAPL, (WED, 0))
+    short_tue = _window(MSFT, (TUE, 1))
+    untouched_mon = _window(MSFT, (MON, 0))
+    short_wed = _window(AAPL, (WED, 2))
+
+    ordered = order_windows([untouched_wed, short_tue, untouched_mon, short_wed])
 
     assert ordered == [untouched_wed, untouched_mon, short_tue, short_wed]
 
 
-def test_order_cells_on_an_empty_iterable_is_empty() -> None:
-    assert order_cells([]) == []
+def test_one_untouched_session_is_enough_to_promote_a_mixed_window() -> None:
+    """A window is one request. If any session in it has never been fetched,
+    that request buys new ground and belongs with the untouched group."""
+    mixed = _window(AAPL, (MON, 0), (TUE, 200))
+    all_short = _window(MSFT, (MON, 1), (TUE, 200))
+
+    assert order_windows([all_short, mixed]) == [mixed, all_short]
+
+
+def test_order_windows_on_an_empty_iterable_is_empty() -> None:
+    assert order_windows([]) == []
 
 
 # ── crawl: fetch window ──────────────────────────────────────────
@@ -359,7 +381,15 @@ async def test_a_failed_symbol_is_skipped_for_the_rest_of_the_pass_others_still_
     store = RecordingStore()
 
     report = await crawl(
-        Universe([AAPL, MSFT]), calendar, catalog, feed, store, start=MON, end=TUE, source=SOURCE
+        Universe([AAPL, MSFT]),
+        calendar,
+        catalog,
+        feed,
+        store,
+        start=MON,
+        end=TUE,
+        source=SOURCE,
+        window_days=1,
     )
 
     assert [o.status for o in report.outcomes] == [
@@ -381,7 +411,15 @@ async def test_skipped_cell_carries_no_error_and_writes_nothing() -> None:
     store = RecordingStore()
 
     report = await crawl(
-        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=TUE, source=SOURCE
+        Universe([AAPL]),
+        calendar,
+        catalog,
+        feed,
+        store,
+        start=MON,
+        end=TUE,
+        source=SOURCE,
+        window_days=1,
     )
 
     skipped = report.outcomes[1]
@@ -484,6 +522,7 @@ async def test_skips_neither_increment_nor_reset_the_consecutive_count() -> None
         start=MON,
         end=TUE,
         source=SOURCE,
+        window_days=1,
         max_consecutive_failures=2,
     )
 
@@ -545,7 +584,17 @@ async def test_untouched_cells_are_fetched_before_short_ones_across_the_pass() -
     feed = ScriptedFeed()
     store = RecordingStore()
 
-    await crawl(Universe([SYMA]), calendar, catalog, feed, store, start=MON, end=WED, source=SOURCE)
+    await crawl(
+        Universe([SYMA]),
+        calendar,
+        catalog,
+        feed,
+        store,
+        start=MON,
+        end=WED,
+        source=SOURCE,
+        window_days=1,
+    )
 
     assert [call[3] for call in feed.calls] == [session_mon.close_ns + 1, session_wed.close_ns + 1]
 
@@ -553,7 +602,7 @@ async def test_untouched_cells_are_fetched_before_short_ones_across_the_pass() -
 # ── crawl: limit and validation ──────────────────────────────────────
 
 
-async def test_limit_truncates_cells_offered_but_planned_reports_the_full_count() -> None:
+async def test_limit_truncates_requests_offered_but_planned_reports_the_full_count() -> None:
     calendar = FakeCalendar(
         {Venue.NASDAQ: {day: _session(Venue.NASDAQ, day) for day in (MON, TUE, WED)}}
     )
@@ -562,11 +611,50 @@ async def test_limit_truncates_cells_offered_but_planned_reports_the_full_count(
     store = RecordingStore()
 
     report = await crawl(
-        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=WED, source=SOURCE, limit=1
+        Universe([AAPL]),
+        calendar,
+        catalog,
+        feed,
+        store,
+        start=MON,
+        end=WED,
+        source=SOURCE,
+        window_days=1,
+        limit=1,
     )
 
     assert report.planned == 3
+    assert report.planned_windows == 3
     assert len(report.outcomes) == 1
+    assert len(feed.calls) == 1
+
+
+async def test_limit_counts_requests_not_sessions() -> None:
+    """One window holding three sessions is one request, so a limit of one
+    lets all three through. Limiting sessions instead would make `--limit`
+    mean something different depending on how the dates happened to group."""
+    calendar = FakeCalendar(
+        {Venue.NASDAQ: {day: _session(Venue.NASDAQ, day) for day in (MON, TUE, WED)}}
+    )
+    catalog = FakeCatalog()
+    feed = ScriptedFeed()
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]),
+        calendar,
+        catalog,
+        feed,
+        store,
+        start=MON,
+        end=WED,
+        source=SOURCE,
+        limit=1,
+    )
+
+    assert report.planned == 3
+    assert report.planned_windows == 1
+    assert len(report.outcomes) == 3
     assert len(feed.calls) == 1
 
 
@@ -661,6 +749,172 @@ async def test_on_outcome_is_called_once_per_cell_in_order() -> None:
     assert len(seen) == 2
 
 
+# ── crawl: windowing ────────────────────────────────────────────────
+
+
+async def test_consecutive_sessions_are_fetched_as_one_request_spanning_them() -> None:
+    """The whole point of the change: three missing sessions cost one paced
+    request, bounded by the oldest open and the newest close."""
+    session_mon = _session(Venue.NASDAQ, MON)
+    session_wed = _session(Venue.NASDAQ, WED)
+    calendar = FakeCalendar(
+        {Venue.NASDAQ: {day: _session(Venue.NASDAQ, day) for day in (MON, TUE, WED)}}
+    )
+    catalog = FakeCatalog()
+    feed = ScriptedFeed()
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=WED, source=SOURCE
+    )
+
+    assert feed.calls == [
+        (AAPL, BarInterval.MIN_1, session_mon.open_ns + 1, session_wed.close_ns + 1)
+    ]
+    assert report.requests == 1
+    assert report.planned == 3  # still measured in instrument-sessions
+
+
+async def test_a_windows_bars_are_split_and_written_under_each_session_date() -> None:
+    """One request, three writes. A bar filed under the wrong session date is
+    invisible to the plan, which counts by date, so the split is the part that
+    has to be right."""
+    sessions = {day: _session(Venue.NASDAQ, day) for day in (MON, TUE, WED)}
+    calendar = FakeCalendar({Venue.NASDAQ: sessions})
+    catalog = FakeCatalog()
+    bars = tuple(
+        _bar(AAPL, sessions[day].open_ns + n * BarInterval.MIN_1.nanos)
+        for day in (MON, TUE, WED)
+        for n in (1, 2)
+    )
+    feed = ScriptedFeed({AAPL: bars})
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=WED, source=SOURCE
+    )
+
+    assert [(o.session_date, o.status, o.written) for o in report.outcomes] == [
+        (MON, CellStatus.FILLED, 2),
+        (TUE, CellStatus.FILLED, 2),
+        (WED, CellStatus.FILLED, 2),
+    ]
+    assert store.writes == [
+        (bars[0:2], SOURCE, MON),
+        (bars[2:4], SOURCE, TUE),
+        (bars[4:6], SOURCE, WED),
+    ]
+
+
+async def test_bars_arriving_out_of_order_still_land_in_the_right_sessions() -> None:
+    """The split walks bars and sessions in step, so an unsorted answer would
+    be walked past and silently dropped. It is sorted first for that reason."""
+    sessions = {day: _session(Venue.NASDAQ, day) for day in (MON, TUE)}
+    calendar = FakeCalendar({Venue.NASDAQ: sessions})
+    catalog = FakeCatalog()
+    monday = _bar(AAPL, sessions[MON].open_ns + BarInterval.MIN_1.nanos)
+    tuesday = _bar(AAPL, sessions[TUE].open_ns + BarInterval.MIN_1.nanos)
+    feed = ScriptedFeed({AAPL: (tuesday, monday)})  # newest first
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=TUE, source=SOURCE
+    )
+
+    assert [(o.session_date, o.written) for o in report.outcomes] == [(MON, 1), (TUE, 1)]
+    assert store.writes == [((monday,), SOURCE, MON), ((tuesday,), SOURCE, TUE)]
+
+
+async def test_a_session_the_feed_had_nothing_for_is_empty_while_its_neighbours_fill() -> None:
+    """A halt in the middle of a window must not cost the sessions either side
+    of it — and must still read as empty rather than as a short fill."""
+    sessions = {day: _session(Venue.NASDAQ, day) for day in (MON, TUE, WED)}
+    calendar = FakeCalendar({Venue.NASDAQ: sessions})
+    catalog = FakeCatalog()
+    monday = _bar(AAPL, sessions[MON].open_ns + BarInterval.MIN_1.nanos)
+    wednesday = _bar(AAPL, sessions[WED].open_ns + BarInterval.MIN_1.nanos)
+    feed = ScriptedFeed({AAPL: (monday, wednesday)})
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=WED, source=SOURCE
+    )
+
+    assert [(o.session_date, o.status) for o in report.outcomes] == [
+        (MON, CellStatus.FILLED),
+        (TUE, CellStatus.EMPTY),
+        (WED, CellStatus.FILLED),
+    ]
+    assert [session_date for _, _, session_date in store.writes] == [MON, WED]
+
+
+async def test_a_failed_request_fails_every_session_in_its_window_but_counts_once() -> None:
+    """A window is one request, so it is one failure. Counting its sessions
+    would trip a breaker of five on the first unresolvable listing, since a
+    month's window holds about twenty-two of them."""
+    sessions = {day: _session(Venue.NASDAQ, day) for day in (MON, TUE, WED)}
+    calendar = FakeCalendar({Venue.NASDAQ: sessions})
+    catalog = FakeCatalog()
+    feed = ScriptedFeed(raises={AAPL: RuntimeError("no such contract")})
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]),
+        calendar,
+        catalog,
+        feed,
+        store,
+        start=MON,
+        end=WED,
+        source=SOURCE,
+        max_consecutive_failures=2,
+    )
+
+    assert [o.status for o in report.outcomes] == [CellStatus.FAILED] * 3
+    assert all("no such contract" in (o.error or "") for o in report.outcomes)
+    assert report.completed  # one failure, not three
+
+
+async def test_a_gap_wider_than_the_window_is_two_requests() -> None:
+    """Windows are capped in calendar days, not in sessions."""
+    far = date(2024, 5, 6)
+    sessions = {day: _session(Venue.NASDAQ, day) for day in (MON, far)}
+    calendar = FakeCalendar({Venue.NASDAQ: sessions})
+    catalog = FakeCatalog()
+    feed = ScriptedFeed()
+    store = RecordingStore()
+
+    report = await crawl(
+        Universe([AAPL]), calendar, catalog, feed, store, start=MON, end=far, source=SOURCE
+    )
+
+    assert report.requests == 2
+    assert [call[0] for call in feed.calls] == [AAPL, AAPL]
+    # Newest span first, as with cells.
+    assert [o.session_date for o in report.outcomes] == [far, MON]
+
+
+@pytest.mark.parametrize("window_days", [0, -1])
+async def test_a_non_positive_window_days_raises_value_error(window_days: int) -> None:
+    calendar = FakeCalendar({Venue.NASDAQ: {MON: _session(Venue.NASDAQ, MON)}})
+    catalog = FakeCatalog()
+    feed = ScriptedFeed()
+    store = RecordingStore()
+
+    with pytest.raises(ValueError, match=r"window_days must be at least 1"):
+        await crawl(
+            Universe([AAPL]),
+            calendar,
+            catalog,
+            feed,
+            store,
+            start=MON,
+            end=MON,
+            source=SOURCE,
+            window_days=window_days,
+        )
+
+
 # ── CrawlReport: derived counts ─────────────────────────────────────────
 
 
@@ -668,17 +922,21 @@ def _outcome(status: CellStatus, *, written: int = 0) -> CellOutcome:
     return CellOutcome(symbol=AAPL, session_date=MON, status=status, written=written)
 
 
-def test_requests_counts_every_outcome_except_skips() -> None:
+def test_requests_and_planned_windows_are_recorded_not_derived() -> None:
+    """Since windowing, requests cannot be counted from the outcomes: four
+    sessions may be one request. The pass records what it actually sent."""
     report = CrawlReport(
         outcomes=(
             _outcome(CellStatus.FILLED, written=5),
-            _outcome(CellStatus.SKIPPED),
-            _outcome(CellStatus.FAILED),
+            _outcome(CellStatus.FILLED, written=2),
+            _outcome(CellStatus.EMPTY),
             _outcome(CellStatus.EMPTY),
         ),
         planned=4,
+        planned_windows=1,
+        requests=1,
     )
-    assert report.requests == 3
+    assert (report.requests, report.planned_windows) == (1, 1)
 
 
 def test_bars_written_sums_across_outcomes() -> None:

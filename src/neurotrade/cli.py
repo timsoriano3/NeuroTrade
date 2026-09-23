@@ -443,7 +443,7 @@ def ibkr_backfill(
         Path, typer.Option("--universe", help="Universe file naming the symbols to fill.")
     ] = _DEFAULT_UNIVERSE,
     limit: Annotated[
-        int | None, typer.Option("--limit", min=1, help="Most cells to offer per pass.")
+        int | None, typer.Option("--limit", min=1, help="Most requests to make per pass.")
     ] = None,
     passes: Annotated[
         int, typer.Option("--passes", min=1, help="Passes to run before exiting.")
@@ -454,6 +454,11 @@ def ibkr_backfill(
     Each pass plans from what is already on disk, fetches every missing or
     short instrument-session, and writes it under the raw data root. Killing
     the command loses nothing: the next run's plan starts from the corpus.
+
+    **One request covers a month, not a day.** A symbol's missing sessions are
+    grouped into 30-day windows before fetching, which is the largest span IBKR
+    answers at one-minute bars. `--limit` therefore counts requests; the
+    per-session lines on stderr are unchanged.
 
     **`--start` has no default** because a default would silently decide how
     much history the corpus holds. `--end` does: yesterday, because today's
@@ -541,7 +546,11 @@ def ibkr_backfill(
         # IBKR's VWAP fell outside the bar's own high/low. The bar was kept and
         # the field dropped; a worst excess of a cent or more is not rounding.
         typer.echo(f"vwap      {symbol} dropped {drop.count}, worst {drop.worst_excess}", err=True)
-    typer.echo(f"passes    {len(reports)}, last planned {last_report.planned} cells", err=True)
+    typer.echo(
+        f"passes    {len(reports)}, last planned {last_report.planned} sessions "
+        f"in {last_report.planned_windows} requests",
+        err=True,
+    )
     typer.echo(f"corpus    {bars_root}", err=True)
     if not last_report.completed:
         typer.echo(f"stopped   {last_report.stopped}", err=True)
@@ -569,6 +578,7 @@ def _log_pass(
         end=str(last),
         interval=interval.value,
         planned=report.planned,
+        planned_windows=report.planned_windows,
         requests=report.requests,
         bars_written=report.bars_written,
         filled=report.count(CellStatus.FILLED),
@@ -738,7 +748,7 @@ def seed_ingest(
         ),
     ] = None,
     limit: Annotated[
-        int | None, typer.Option("--limit", min=1, help="Most instrument-sessions to offer.")
+        int | None, typer.Option("--limit", min=1, help="Most requests to make.")
     ] = None,
 ) -> None:
     """Normalise a fetched snapshot into the corpus, one root per vendor.
@@ -903,6 +913,7 @@ def _log_seed_ingest(job: _SeedJob, report: CrawlReport, span: tuple[date, date]
         start=str(span[0]),
         end=str(span[1]),
         planned=report.planned,
+        planned_windows=report.planned_windows,
         requests=report.requests,
         bars_written=report.bars_written,
         filled=report.count(CellStatus.FILLED),
@@ -932,7 +943,7 @@ def daily_backfill(
         Path, typer.Option("--universe", help="Universe file naming the symbols to fill.")
     ] = _DEFAULT_UNIVERSE,
     limit: Annotated[
-        int | None, typer.Option("--limit", min=1, help="Most instrument-sessions to offer.")
+        int | None, typer.Option("--limit", min=1, help="Most requests to make.")
     ] = None,
 ) -> None:
     """Fill the daily-bar corpus from Yahoo Finance (§12.1 stage 3).
@@ -940,8 +951,8 @@ def daily_backfill(
     Runs the **same crawler** the IBKR backfill and the seed ingest run, at
     `1d` instead of `1m`, so the calendar trim, the resumability and the
     outcome report are shared rather than reimplemented (§3.6). Yahoo is asked
-    once per symbol for the whole range; the crawler's per-session cells are
-    served from that one download.
+    once per symbol for the whole range; the crawler's windows are served from
+    that one download.
 
     Bars land under `<derived_dir>/daily/yfinance/`, never beside the minute
     bars: the catalog counts bars without looking at provenance, so a daily bar
@@ -1032,6 +1043,7 @@ def _log_daily_backfill(report: CrawlReport, universe: Universe, first: date, la
         start=str(first),
         end=str(last),
         planned=report.planned,
+        planned_windows=report.planned_windows,
         requests=report.requests,
         bars_written=report.bars_written,
         filled=report.count(CellStatus.FILLED),

@@ -15,7 +15,7 @@ corpus the module exists to prevent.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -25,7 +25,12 @@ from neurotrade.core.clock import to_nanos
 from neurotrade.core.events import BarInterval
 from neurotrade.core.types import Symbol, Venue
 from neurotrade.core.universe import Universe
-from neurotrade.ingest.backfill import BackfillCell, plan_backfill
+from neurotrade.ingest.backfill import (
+    BackfillCell,
+    BackfillWindow,
+    plan_backfill,
+    plan_windows,
+)
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
 MSFT = Symbol("MSFT", Venue.NASDAQ)
@@ -364,3 +369,206 @@ def test_ordering_is_deterministic_across_runs() -> None:
     ]
 
     assert first == second
+
+
+# ── BackfillWindow: validation ────────────────────────────────
+
+
+def _cell(symbol: Symbol, day: date, *, held: int = 0) -> BackfillCell:
+    return BackfillCell(
+        symbol=symbol,
+        session=_session(symbol.venue, day),
+        interval=BarInterval.MIN_1,
+        held_bars=held,
+    )
+
+
+def _window(symbol: Symbol, *days: date) -> BackfillWindow:
+    return BackfillWindow(
+        symbol=symbol,
+        interval=BarInterval.MIN_1,
+        cells=tuple(_cell(symbol, day) for day in days),
+    )
+
+
+def test_a_window_covering_no_sessions_is_rejected() -> None:
+    with pytest.raises(ValueError, match=r"must cover at least one session"):
+        BackfillWindow(symbol=AAPL, interval=BarInterval.MIN_1, cells=())
+
+
+def test_a_window_holding_another_symbols_cell_is_rejected() -> None:
+    with pytest.raises(ValueError, match=r"does not belong in a"):
+        BackfillWindow(
+            symbol=AAPL,
+            interval=BarInterval.MIN_1,
+            cells=(_cell(AAPL, MON), _cell(MSFT, TUE)),
+        )
+
+
+def test_a_window_holding_another_intervals_cell_is_rejected() -> None:
+    five_minute = BackfillCell(
+        symbol=AAPL, session=_session(Venue.NASDAQ, MON), interval=BarInterval.MIN_5, held_bars=0
+    )
+    with pytest.raises(ValueError, match=r"does not belong in a"):
+        BackfillWindow(symbol=AAPL, interval=BarInterval.MIN_1, cells=(five_minute,))
+
+
+@pytest.mark.parametrize("days", [(TUE, MON), (MON, MON)])
+def test_cells_out_of_ascending_order_or_repeated_are_rejected(days: tuple[date, ...]) -> None:
+    """Order is load-bearing: the bars a request returns are split across the
+    cells by walking both in step, so an unordered window would file bars
+    under the wrong session."""
+    with pytest.raises(ValueError, match=r"must ascend without repeats"):
+        _window(AAPL, *days)
+
+
+# ── BackfillWindow: bounds ────────────────────────────────────
+
+
+def test_bounds_span_the_oldest_open_to_the_newest_close() -> None:
+    window = _window(AAPL, MON, WED)
+
+    assert window.start_ns == _session(Venue.NASDAQ, MON).open_ns
+    assert window.end_ns == _session(Venue.NASDAQ, WED).close_ns
+    assert (window.first_date, window.last_date) == (MON, WED)
+
+
+def test_span_days_counts_calendar_days_inclusive_of_both_ends() -> None:
+    """Calendar rather than trading days, because that is the unit a feed's
+    duration limit is expressed in: MON..WED is three days, not two sessions."""
+    assert _window(AAPL, MON, WED).span_days == 3
+    assert _window(AAPL, MON).span_days == 1
+
+
+def test_has_untouched_is_true_when_any_session_has_nothing_on_disk() -> None:
+    mixed = BackfillWindow(
+        symbol=AAPL,
+        interval=BarInterval.MIN_1,
+        cells=(_cell(AAPL, MON, held=200), _cell(AAPL, TUE, held=0)),
+    )
+    all_short = BackfillWindow(
+        symbol=AAPL,
+        interval=BarInterval.MIN_1,
+        cells=(_cell(AAPL, MON, held=200), _cell(AAPL, TUE, held=1)),
+    )
+
+    assert mixed.has_untouched
+    assert not all_short.has_untouched
+
+
+# ── plan_windows: grouping ────────────────────────────────────
+
+
+def test_consecutive_sessions_of_one_symbol_become_one_window() -> None:
+    windows = list(plan_windows([_cell(AAPL, WED), _cell(AAPL, TUE), _cell(AAPL, MON)]))
+
+    assert len(windows) == 1
+    assert [cell.session_date for cell in windows[0].cells] == [MON, TUE, WED]
+
+
+def test_each_symbol_gets_its_own_window_within_a_span() -> None:
+    """A window is one request and a request is for one instrument."""
+    windows = list(plan_windows([_cell(AAPL, MON), _cell(MSFT, MON)]))
+
+    assert [window.symbol for window in windows] == [AAPL, MSFT]
+
+
+def test_sessions_further_apart_than_the_cap_fall_into_separate_windows() -> None:
+    far = date(2024, 5, 6)
+
+    windows = list(plan_windows([_cell(AAPL, far), _cell(AAPL, MON)]))
+
+    assert [(w.first_date, w.last_date) for w in windows] == [(far, far), (MON, MON)]
+
+
+def test_the_cap_is_calendar_days_not_sessions() -> None:
+    """Thirty calendar days is about twenty-two sessions, and the limit the
+    feed enforces is the calendar one."""
+    inside = date(2024, 4, 2)  # MON + 29 days
+    outside = date(2024, 4, 3)  # MON + 30 days
+
+    assert len(list(plan_windows([_cell(AAPL, inside), _cell(AAPL, MON)]))) == 1
+    assert len(list(plan_windows([_cell(AAPL, outside), _cell(AAPL, MON)]))) == 2
+
+
+def test_window_days_of_one_reproduces_a_request_per_session() -> None:
+    windows = list(plan_windows([_cell(AAPL, TUE), _cell(AAPL, MON)], window_days=1))
+
+    assert [w.first_date for w in windows] == [TUE, MON]
+    assert all(len(w.cells) == 1 for w in windows)
+
+
+def test_a_gap_inside_a_window_is_spanned_not_split() -> None:
+    """The window holds only the *missing* sessions; the request covers the
+    whole span anyway, and a session already complete simply has no cell."""
+    windows = list(plan_windows([_cell(AAPL, WED), _cell(AAPL, MON)]))
+
+    assert len(windows) == 1
+    assert [cell.session_date for cell in windows[0].cells] == [MON, WED]
+
+
+def test_an_empty_plan_yields_no_windows() -> None:
+    assert list(plan_windows([])) == []
+
+
+# ── plan_windows: ordering ────────────────────────────────────
+
+
+def test_spans_are_newest_first_with_every_symbol_inside_one_before_the_next() -> None:
+    """`plan_backfill`'s recency-major order at a coarser grain. Grouping
+    symbol-major would fetch five years of AAPL before touching MSFT, and a
+    cross-sectional study cannot use that corpus."""
+    far = date(2024, 5, 6)
+    cells = [
+        _cell(AAPL, far),
+        _cell(MSFT, far),
+        _cell(AAPL, MON),
+        _cell(MSFT, MON),
+    ]
+
+    windows = list(plan_windows(cells))
+
+    assert [(w.symbol.ticker, w.first_date) for w in windows] == [
+        ("AAPL", far),
+        ("MSFT", far),
+        ("AAPL", MON),
+        ("MSFT", MON),
+    ]
+
+
+def test_spans_are_anchored_on_the_newest_date_so_the_partial_one_is_oldest() -> None:
+    """A crawl killed early most needs the recent end whole, so the span that
+    ends up shorter than the cap must be the oldest one."""
+    days = [date(2024, 3, 4) + timedelta(days=n) for n in range(0, 40, 2)]
+
+    windows = list(plan_windows([_cell(AAPL, day) for day in reversed(days)]))
+
+    assert [w.span_days for w in windows] == [29, 9]
+
+
+def test_grouping_is_deterministic_across_runs() -> None:
+    cells = [_cell(symbol, day) for day in (WED, TUE, MON) for symbol in (AAPL, MSFT, JPM)]
+
+    first = [(w.symbol, w.first_date, w.last_date) for w in plan_windows(cells)]
+    second = [(w.symbol, w.first_date, w.last_date) for w in plan_windows(cells)]
+
+    assert first == second
+
+
+# ── plan_windows: validation ──────────────────────────────────
+
+
+@pytest.mark.parametrize("window_days", [0, -1])
+def test_a_non_positive_window_days_raises_value_error(window_days: int) -> None:
+    with pytest.raises(ValueError, match=r"window_days must be at least 1"):
+        list(plan_windows([_cell(AAPL, MON)], window_days=window_days))
+
+
+def test_mixing_bar_sizes_in_one_plan_raises_value_error() -> None:
+    """A window is one request, and one request asks for one bar size."""
+    daily = BackfillCell(
+        symbol=AAPL, session=_session(Venue.NASDAQ, MON), interval=BarInterval.DAY_1, held_bars=0
+    )
+
+    with pytest.raises(ValueError, match=r"one plan, one bar size"):
+        list(plan_windows([_cell(AAPL, MON), daily]))

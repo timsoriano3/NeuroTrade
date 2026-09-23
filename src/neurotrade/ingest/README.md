@@ -9,8 +9,8 @@ from live market data. This package is that plan.
 
 | File | What it does |
 |---|---|
-| `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work |
-| `crawler.py` | `crawl` — one pass: plan, fetch each missing session from the feed, write it to the store. `CrawlReport` says what the pass did |
+| `backfill.py` | `plan_backfill` — which instrument-sessions are missing, most recent first. `BackfillCell` is one unit of that work. `plan_windows` groups those cells into `BackfillWindow`s, one per request |
+| `crawler.py` | `crawl` — one pass: plan, fetch each missing window from the feed, write each session it covers to the store. `CrawlReport` says what the pass did |
 | `universe_history.py` | `screen_universe` — who was tradable on each past session, from the daily corpus. `ScreenRules` and `LiquidityFloor` are the thresholds |
 | `actions.py` | `fetch_actions` — collect every instrument's splits and dividends. `scan_gaps` — audit the daily corpus for overnight moves those actions do not explain |
 | `quality.py` | `audit_corpus` — the §12.1 stage 5 gate: missing and short sessions, intra-session holes, duplicate prints, halted-looking sessions, survivorship. Reports; never repairs |
@@ -22,7 +22,7 @@ only in which feed, which interval and which dataset root they hand it:
 
 ```bash
 make backfill START=2026-08-01             # IBKR history -> raw/bars, 1m
-make backfill START=2026-08-01 LIMIT=50 PASSES=3
+make backfill START=2026-08-01 LIMIT=50 PASSES=3   # LIMIT counts requests
 make seed                                  # vendor samples -> derived/seed/<source>, 1m
 make daily START=2021-09-15                # Yahoo -> derived/daily/yfinance, 1d
 ```
@@ -70,9 +70,30 @@ interrupted session permanently short.
 
 Known limitation: a session that is *permanently* short — a symbol halted for
 the afternoon, or one that listed midway through the day — never reaches its
-expected count, so it is re-offered on every pass. One request per pass, so it
-blocks nothing, but it never resolves either. Halt marking is part of the corpus
-quality gate in Phase 1, and that is the missing fact.
+expected count, so it is re-offered on every pass. It usually rides along in a
+request that was going to be made anyway, so it blocks nothing, but it never
+resolves either. Halt marking is part of the corpus quality gate in Phase 1, and
+that is the missing fact.
+
+## Plan by session, fetch by window
+
+Completeness is decided one session at a time — bars on disk against
+`TradingSession.expected_bars` — because that is the only comparison that
+survives an interrupted fetch. Requests are priced differently: a history feed
+charges the same for a day as for a month. IBKR answers a 30-day request for
+one-minute bars with all ~22 sessions in it, which is measured behaviour, not
+what its duration table claims.
+
+`plan_windows` sits between the two. It groups each symbol's missing sessions
+into windows of at most 30 calendar days and the crawler makes one request per
+window, splitting what comes back across the sessions and writing each under its
+own date. Filling 58 symbols over five years is ~73,000 requests one session at
+a time and ~3,500 in windows — nine days of crawling against eleven hours.
+
+Nothing about resumability changes, because the windows are derived from the
+plan on every pass and hold no state. `CrawlReport` counts both units: `planned`
+and the outcomes are instrument-sessions, `planned_windows` and `requests` are
+requests.
 
 ## Order is recency-major
 
@@ -80,7 +101,9 @@ Sessions are offered newest first, and every symbol's most recent session comes
 before any symbol's older ones. An interrupted crawl then leaves a corpus that is
 shallow across the whole universe rather than deep for the alphabetically early
 part of it — a cross-sectional study can use the former and cannot use the
-latter.
+latter. Windowing keeps that shape at a coarser grain: the date axis is cut into
+spans first, newest span first, and every symbol's window inside a span is
+offered before any symbol's window in an older one.
 
 ## One pass, then re-plan
 
@@ -88,8 +111,9 @@ latter.
 of passes, because the plan is a snapshot of the corpus and a crawl measured in
 weeks should re-read it rather than trust a queue computed days earlier.
 
-Within a pass, never-fetched sessions go ahead of short ones: a short session
-may be a halt, and re-requesting it mostly returns the same shortfall.
+Within a pass, windows holding a never-fetched session go ahead of windows of
+only short ones: a short session may be a halt, and re-requesting it mostly
+returns the same shortfall.
 
 Pacing is the feed's job, not the loop's — `MarketDataPort` requires adapters
 to pace themselves, and the IBKR adapter waits on its own limiter. A symbol

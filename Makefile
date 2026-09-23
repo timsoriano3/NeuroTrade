@@ -119,7 +119,8 @@ paper-smoke: ## Gate G2: submit a paper order, acknowledge, cancel
 
 # START has no default: a default would silently decide how much history the
 # corpus holds. END defaults to yesterday inside the command; LIMIT and PASSES
-# are optional.
+# are optional. LIMIT counts *requests*, and one request covers up to 30 days
+# of a symbol's missing sessions.
 backfill: ## Fill the corpus from IBKR. START=YYYY-MM-DD [END= LIMIT= PASSES=]
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
 	$(SLEEPLESS) $(PY) neurotrade --profile $(PROFILE) ibkr backfill --start $(START) \
