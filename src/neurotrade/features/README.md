@@ -14,6 +14,7 @@ is not the software trading your money.
 |---|---|
 | `registry.py` | Registering a feature, and the rules every feature obeys |
 | `indicators.py` | The registered features: log return, ATR, realised volatility, relative volume, EMA, fractionally differenced close |
+| `resolver.py` | The rolling per-symbol window a feature is computed from |
 | `levels.py` | Session-anchored reference levels — opening range, session VWAP, distance from it. Plain functions, not registered |
 
 **Why `levels.py` sits outside the registry.** A registered feature declares a
@@ -23,6 +24,14 @@ minute — so there is nothing to declare. §5.3 already treats these as separat
 "shared infrastructure", so the split follows the spec rather than working
 around it. The cost is that the lookahead guard does not apply to them: pass
 bars up to the decision moment and no further.
+
+**Who keeps the history.** A `FeatureSpec` is handed a window and remembers
+nothing, so something has to hold the bars. `resolver.py` does, per symbol, and
+it is the only thing that does — which is what lets `StrategyContext` hand a
+strategy values and no series at all. The window is continuous across sessions
+on purpose: `max_lookback` exists so the engine can load history *before* a
+session opens, and a buffer that reset at midnight would leave every
+open-of-session strategy cold for its first `lookback` bars.
 
 ## The two rules a feature obeys
 

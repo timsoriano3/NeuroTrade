@@ -17,10 +17,10 @@ import pytest
 
 from neurotrade.bus import HandlerFailed
 from neurotrade.core.clock import SimClock
-from neurotrade.core.events import Bar, BarInterval
+from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.intent import EntryTrigger, Intent
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
-from neurotrade.lab.engine import BacktestEngine, BacktestResult, default_context
+from neurotrade.lab.engine import BacktestEngine, BacktestResult, NullContext
 from neurotrade.lab.feed import CorpusFeed
 from neurotrade.strategies.base import Regime, Strategy, StrategyContext
 
@@ -58,7 +58,7 @@ class ListStore:
 
 
 class Proposer(Strategy):
-    """Fires on every bar. Declares UNKNOWN so it runs under `default_context`."""
+    """Fires on every bar. Declares UNKNOWN so it runs under `NullContext`."""
 
     name, version = "proposer", "1.0.0"
     regimes: ClassVar[tuple[Regime, ...]] = (Regime.UNKNOWN,)
@@ -106,21 +106,21 @@ def engine_over(bars: Sequence[Bar], symbols: tuple[Symbol, ...]) -> BacktestEng
     return BacktestEngine(CorpusFeed(ListStore(bars), symbols, BarInterval.MIN_1))
 
 
-# ── The default context ──────────────────────────────────────
+# ── The null context ─────────────────────────────────────────
 
 
-def test_default_context_grants_no_regime() -> None:
+def test_null_context_grants_no_regime() -> None:
     """§5.7: UNKNOWN grants nothing, so an undeclared strategy cannot fire."""
-    assert default_context(bar(AAPL, 10)).regime is Regime.UNKNOWN
+    assert NullContext()(bar(AAPL, 10), Proposer()).regime is Regime.UNKNOWN
 
 
-def test_default_context_is_stamped_at_the_bar_close() -> None:
+def test_null_context_is_stamped_at_the_bar_close() -> None:
     """`as_of` at the open would be the classic lookahead bug."""
-    assert default_context(bar(AAPL, 4_200)).as_of == 4_200
+    assert NullContext()(bar(AAPL, 4_200), Proposer()).as_of == 4_200
 
 
-def test_default_context_exposes_no_features() -> None:
-    assert default_context(bar(AAPL, 10)).values == {}
+def test_null_context_exposes_no_features() -> None:
+    assert NullContext()(bar(AAPL, 10), Proposer()).values == {}
 
 
 # ── Intent collection ────────────────────────────────────────
@@ -330,4 +330,112 @@ def test_an_empty_corpus_runs_clean() -> None:
 def test_result_holds_no_timing() -> None:
     """Wall-clock duration varies for reasons unrelated to behaviour."""
     names = set(BacktestResult.__dataclass_fields__)
-    assert names == {"run", "intents"}
+    assert names == {"run", "intents", "regime_gated"}
+
+
+# ── The context seam ─────────────────────────────────────────
+
+
+class FixedContext:
+    """A `ContextSource` reporting one regime, recording what it was told."""
+
+    def __init__(self, regime: Regime = Regime.UNKNOWN) -> None:
+        self.regime = regime
+        self.declared: list[str] = []
+        self.observed: list[int] = []
+
+    def declare(self, strategy: Strategy) -> None:
+        self.declared.append(strategy.qualified_name)
+
+    def observe(self, bar: Bar) -> None:
+        self.observed.append(bar.ts_event)
+
+    def __call__(self, bar: Bar, strategy: Strategy) -> StrategyContext:
+        return StrategyContext(
+            symbol=bar.symbol,
+            as_of=bar.ts_event,
+            session=MarketSession.REGULAR,
+            regime=self.regime,
+            values={},
+        )
+
+
+class TrendProposer(Proposer):
+    """Proposes like `Proposer`, but only where §5.7 says a trend was classified."""
+
+    name, version = "trend_proposer", "1.0.0"
+    regimes: ClassVar[tuple[Regime, ...]] = (Regime.TREND_UP,)
+
+
+def engine_with(context: FixedContext, *, ungated: bool = False) -> BacktestEngine:
+    return BacktestEngine(
+        CorpusFeed(ListStore([bar(AAPL, 10), bar(AAPL, 20)]), (AAPL,), BarInterval.MIN_1),
+        context=context,
+        ungated=ungated,
+    )
+
+
+def test_every_strategy_is_declared_to_the_context() -> None:
+    context = FixedContext()
+    engine = engine_with(context)
+    engine.add_strategy(Proposer())
+    assert context.declared == ["proposer@1.0.0"]
+
+
+def test_the_context_sees_every_bar_even_when_nothing_may_fire() -> None:
+    """Feature history is a property of the data, not of who was eligible."""
+    context = FixedContext()
+    engine = engine_with(context)
+    engine.add_strategy(TrendProposer())
+    engine.run(0, 100)
+    assert context.observed == [10, 20]
+
+
+def test_a_classified_regime_still_gates_by_default() -> None:
+    context = FixedContext()
+    engine = engine_with(context)
+    engine.add_strategy(TrendProposer())
+    assert engine.run(0, 100).intents == ()
+
+
+def test_ungated_lets_an_unclassified_regime_permit() -> None:
+    """Phase 2 has no classifier, so UNKNOWN is every bar until Phase 5."""
+    engine = engine_with(FixedContext(), ungated=True)
+    engine.add_strategy(TrendProposer())
+    assert len(engine.run(0, 100).intents) == 2
+
+
+def test_ungated_does_not_open_a_regime_that_was_classified() -> None:
+    """§5.7 makes the midday lull a default no-trade window, research or not."""
+    engine = engine_with(FixedContext(Regime.LIQUIDITY_LULL), ungated=True)
+    engine.add_strategy(TrendProposer())
+    assert engine.run(0, 100).intents == ()
+
+
+def test_the_result_records_whether_the_gate_was_on() -> None:
+    """An ungated number read later as a gated one is how an overfit result promotes."""
+    gated = engine_with(FixedContext()).run(0, 100)
+    ungated = engine_with(FixedContext(), ungated=True).run(0, 100)
+    assert (gated.regime_gated, ungated.regime_gated) == (True, False)
+
+
+def test_warmup_bars_warm_the_context_without_being_dispatched() -> None:
+    context = FixedContext()
+    engine = BacktestEngine(
+        CorpusFeed(
+            ListStore([bar(AAPL, 10), bar(AAPL, 20), bar(AAPL, 30)]),
+            (AAPL,),
+            BarInterval.MIN_1,
+        ),
+        context=context,
+    )
+    engine.add_strategy(Proposer())
+    result = engine.run(20, 100, warmup_ns=20)
+    assert (context.observed, result.run.events_read) == ([10, 20, 30], 2)
+
+
+def test_warmup_never_reaches_before_the_epoch() -> None:
+    context = FixedContext()
+    engine = engine_with(context)
+    engine.add_strategy(Proposer())
+    assert engine.run(0, 100, warmup_ns=1_000).run.events_read == 2

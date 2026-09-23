@@ -13,6 +13,7 @@ filtering out the proposals that will not work.
 | File | What it does |
 |---|---|
 | `base.py` | The contract every strategy implements, and the registry that holds them |
+| `context.py` | Fills in what a strategy may see: venue phase, regime, resolved features |
 
 No strategies are implemented yet. The first two arrive in Phase 2: an opening-
 range breakout, and one that trades a stock's movement relative to the market.
@@ -37,3 +38,17 @@ Trend days, choppy days and reversal days reward different tools. Each strategy
 declares which conditions it is allowed to fire in, and the host enforces it — so
 a breakout strategy and a fade-the-breakout strategy can never be live at the
 same time.
+
+**Only one of those conditions is classified today.** The model that tells trend
+from chop is an HMM and arrives in Phase 5. Fitting a stand-in now would put an
+unvalidated model in the decision path of every result Phase 2 produces, and its
+thresholds would spend trial budget that the deflated Sharpe counts against
+every strategy. So `context.py` classifies the one part of §5.7 that is a clock
+fact rather than a model — the 12:00–14:00 ET liquidity lull, a default no-trade
+window — and reports everything else as unclassified, which grants nothing.
+
+That leaves research needing a way to measure a strategy before the classifier
+exists. The backtest engine has one: it can treat *unclassified* as permissive,
+and it stamps the result to say it did. A condition that really was classified
+still gates, so the lull stays closed even then, and a number produced that way
+cannot later be mistaken for one produced under the real gate.

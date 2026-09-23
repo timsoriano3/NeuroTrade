@@ -87,11 +87,27 @@ that changes its mind changes the digest even when the input data is identical.
 becomes of it is `labelling.py`'s triple barrier, not a fill simulator. One
 place decides how a position resolves, and it is the place the labels come from.
 
-Two seams are stubbed until their own commits land — market session and regime,
-and feature resolution. Both are `default_context`, which grants nothing. Since
-`Strategy.regimes` defaults to `()` and `Regime.UNKNOWN` grants nothing, a real
-strategy does not fire under it at all. That is the safe direction to fail, and
-it is why an early run coming back empty is correct rather than broken.
+What a strategy sees is assembled elsewhere — `strategies/context.py` turns the
+venue calendar and the feature library into one view per strategy per bar. The
+engine's own default, `NullContext`, grants nothing: no features and no
+classified regime. Since `Strategy.regimes` defaults to `()` and
+`Regime.UNKNOWN` grants nothing, a real strategy does not fire under it at all.
+That is the safe direction to fail, and it is why a run wired that way coming
+back empty is correct rather than broken.
+
+**Research runs before the regime classifier exists.** §5.7's HMM lands in Phase
+5, so every regime a classifier would name is unclassified until then and
+nothing declaring a real one would ever fire. `BacktestEngine(ungated=True)`
+treats *unclassified* — and only unclassified — as permissive, and the result
+carries `regime_gated=False` so the number cannot later be read as though the
+gate had been on. A regime that really was classified still gates, which keeps
+the midday liquidity lull a no-trade window even in a research run.
+
+**Features are warm only if you warm them.** `run(start, end, warmup_ns=...)`
+reads the span before `start` into the feature history without dispatching it,
+so nothing in it reaches the bus or the digest. Without that, every feature is
+cold for its first `lookback` bars and the open-of-session strategies of §5.2
+are silent exactly where they are supposed to trade.
 
 The useful part is that the digest covers **outputs as well as inputs**. Once
 strategies exist, a strategy that starts deciding differently changes the digest
