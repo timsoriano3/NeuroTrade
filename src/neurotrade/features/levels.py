@@ -53,6 +53,15 @@ __all__ = [
     "vwap_distance",
 ]
 
+RANGE_MEMORY: Final = 14
+"""Completed sessions whose high-low range is averaged into `prior_range_mean`.
+
+Fourteen because that is the window every volatility measure in the library
+already uses (`atr`), so a gap quoted in these units is comparable with one
+quoted in ATR units. It is a *daily* scale on purpose: the corpus feeds minute
+bars, and an overnight gap measured in minute-ATR units is a three-digit number
+that no published threshold applies to."""
+
 OPENING_WINDOWS: Final = (5, 15, 30, 60)
 """Opening-range windows tracked live, in minutes — the four §5.2 names.
 
@@ -311,6 +320,7 @@ class SessionLevels:
     vwap: Price | None  # volume-weighted average since the open; None if nothing traded
     bar_count: int  # bars seen since the open, so a caller can tell warm from cold
     prior_close: Price | None  # previous session's final close; None on the first session seen
+    prior_range_mean: Decimal | None = None  # mean high-low range of the last RANGE_MEMORY sessions
     opening_ranges: Mapping[int, OpeningRange] = field(default_factory=dict)
     """Completed opening ranges by window, for the windows in `OPENING_WINDOWS`.
     A window appears only once it has filled — see `opening_range`."""
@@ -334,6 +344,32 @@ class SessionLevels:
         if self.prior_close is None:
             return None
         return float((self.session_open.value - self.prior_close.value) / self.prior_close.value)
+
+    @property
+    def gap_in_ranges(self) -> float | None:
+        """The overnight gap in units of a typical recent session's range.
+
+        The scale published gap thresholds are quoted on: "a gap wider than
+        1.2 ATR fills about 8% of the time" is a statement about daily
+        volatility, and the same gap expressed in minute-bar volatility is a
+        different number by two orders of magnitude.
+
+        Returns:
+            Signed — positive means the session opened above yesterday's close.
+            `None` until both a prior close and a full range history exist.
+
+        Example:
+            >>> SessionLevels(
+            ...     session_date=date(2024, 7, 8), open_ns=0, close_ns=1,
+            ...     session_open=Price("103"), high=Price("103"), low=Price("103"),
+            ...     close=Price("103"), vwap=None, bar_count=1, prior_close=Price("100"),
+            ...     prior_range_mean=Decimal("2"),
+            ... ).gap_in_ranges
+            1.5
+        """
+        if self.prior_close is None or not self.prior_range_mean:
+            return None
+        return float((self.session_open.value - self.prior_close.value) / self.prior_range_mean)
 
     @property
     def range_width(self) -> Decimal:
@@ -389,12 +425,21 @@ class SessionLevelTracker:
         True
     """
 
-    __slots__ = ("_levels", "_opening_bars", "_prior_close", "_session", "_value", "_volume")
+    __slots__ = (
+        "_levels",
+        "_opening_bars",
+        "_prior_close",
+        "_ranges",
+        "_session",
+        "_value",
+        "_volume",
+    )
 
     def __init__(self) -> None:
         self._levels: dict[Symbol, SessionLevels] = {}
         self._session: dict[Symbol, Nanos] = {}
         self._prior_close: dict[Symbol, Price] = {}
+        self._ranges: dict[Symbol, list[Decimal]] = {}
         self._value: dict[Symbol, Decimal] = {}
         self._volume: dict[Symbol, Decimal] = {}
         self._opening_bars: dict[Symbol, list[Bar]] = {}
@@ -450,6 +495,7 @@ class SessionLevelTracker:
             vwap=vwap_of(self._value[symbol], self._volume[symbol]),
             bar_count=count,
             prior_close=self._prior_close.get(symbol),
+            prior_range_mean=self._range_mean(symbol),
             opening_ranges=ranges,
         )
 
@@ -476,10 +522,28 @@ class SessionLevelTracker:
         finished = self._levels.pop(symbol, None)
         if finished is not None:
             self._prior_close[symbol] = finished.close
+            # Only a session that actually traded contributes a range. A day the
+            # corpus holds one bar of would otherwise drag the mean toward zero
+            # and make every gap after it look enormous.
+            history = self._ranges.setdefault(symbol, [])
+            history.append(finished.range_width)
+            del history[:-RANGE_MEMORY]
         self._session[symbol] = session.open_ns
         self._value[symbol] = Decimal(0)
         self._volume[symbol] = Decimal(0)
         self._opening_bars[symbol] = []
+
+    def _range_mean(self, symbol: Symbol) -> Decimal | None:
+        """Mean session range over the memory, or `None` until it is full.
+
+        `None` rather than a mean of three sessions: a gap quoted against a
+        partial history is a different statistic wearing the same name, and the
+        threshold it is compared with was not measured on one.
+        """
+        history = self._ranges.get(symbol, ())
+        if len(history) < RANGE_MEMORY:
+            return None
+        return tidy_decimal(sum(history, Decimal(0)) / len(history), _PRICE_PLACES)
 
     def __repr__(self) -> str:
         return f"SessionLevelTracker({len(self._levels)} symbols)"

@@ -14,9 +14,17 @@ filtering out the proposals that will not work.
 |---|---|
 | `base.py` | The contract every strategy implements, and the registry that holds them |
 | `context.py` | Fills in what a strategy may see: venue phase, regime, features, session levels |
+| `arsenal.py` | The registry every plugin registers into |
+| `gap_continuation.py` | Trades the direction of a gap too wide to expect a fill (§5.2) |
 
-No strategies are implemented yet. The first two arrive in Phase 2: an opening-
-range breakout, and one that trades a stock's movement relative to the market.
+One strategy exists: `gap_continuation`. The rest of the twelve chosen for Phase
+2 follow, and the plan's Tier 2 — anything cross-sectional — waits on the crawl
+delivering breadth.
+
+**Importing `arsenal.py` does not populate the arsenal.** A plugin registers when
+its own module is imported, so a run that wants one strategy imports that
+strategy and gets only it. Which strategies exist in a run is configuration, not
+a property of the code — §10.2 runs a champion beside a challenger.
 
 ## What a strategy can and cannot see
 

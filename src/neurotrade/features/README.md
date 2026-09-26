@@ -32,8 +32,17 @@ one reaching past the decision moment. The batch functions remain for tests and
 one-off analysis; the two cannot disagree, because the rule for what a bar
 contributes to a VWAP lives in `vwap_contribution` and both call it.
 
-A tracked level resets at the session boundary. Only the prior close survives
-it — which is the one thing that is *about* the boundary.
+A tracked level resets at the session boundary. Two things survive it, and both
+are *about* the boundary: the prior close, and the high-low range of the last
+`RANGE_MEMORY` sessions.
+
+**That range history is there to give a gap a scale.** Published gap thresholds
+("wider than 1.2 ATR fills less than a tenth of the time") are quoted against
+*daily* volatility. The corpus feeds one-minute bars, so the registered `atr` is
+a one-minute statistic and the same gap expressed in it is larger by two orders
+of magnitude — a number no published threshold applies to. `gap_in_ranges`
+divides by the mean recent session range instead, and is `None` until the history
+is full rather than averaging three days and calling it fourteen.
 
 **Who keeps the history.** A `FeatureSpec` is handed a window and remembers
 nothing, so something has to hold the bars. `resolver.py` does, per symbol, and
