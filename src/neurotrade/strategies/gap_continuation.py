@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
-from typing import ClassVar, Final
+from typing import ClassVar, Final, Self
 
 from neurotrade.core.events import Bar, MarketSession
 from neurotrade.core.intent import EntryTrigger, Intent
@@ -47,6 +47,23 @@ from neurotrade.strategies.base import Regime, Strategy, StrategyContext
 __all__ = ["GapContinuation"]
 
 _NO_TRADE: Final[tuple[Intent, ...]] = ()
+
+DEFAULT_MIN_GAP_RANGES: Final = 1.2
+"""Gap width, in mean recent session ranges, below which nothing fires."""
+
+DEFAULT_ENTRY_WINDOW_BARS: Final = 30
+"""Bars after the open during which an entry is still taken."""
+
+SWEEP_MIN_GAP_RANGES: Final = (1.0, 1.2, 1.5)
+"""The band widths measured, and the whole declared search.
+
+Three trials on the **published** axis: the practitioner evidence is a fill
+frequency against gap width, 1.2 is where it puts the boundary, and 1.0 and 1.5
+bracket it on either side. `entry_window_bars` is deliberately not swept — no
+published result distinguishes 15 bars from 30, and a value tried anyway would
+raise the deflation hurdle for every strategy in the family in exchange for
+nothing (§17).
+"""
 
 
 @arsenal.strategy
@@ -76,12 +93,13 @@ class GapContinuation(Strategy):
     """One entry and one exit per session, held for hours: the spread is paid
     twice against a move measured in whole daily ranges."""
 
-    min_gap_ranges: ClassVar[float] = 1.2
+    min_gap_ranges: float = DEFAULT_MIN_GAP_RANGES
     """Gap width, in mean recent session ranges, below which nothing fires.
     Each distinct value is a separate trial — 1.0 and 1.2 are two hypotheses,
-    and the ledger counts them that way."""
+    and the ledger counts them that way, which is what `sweep` declares. Not a
+    `ClassVar`: an instance carries its own, so one run can measure several."""
 
-    entry_window_bars: ClassVar[int] = 30
+    entry_window_bars: int = DEFAULT_ENTRY_WINDOW_BARS
     """Bars after the open during which an entry is still taken. A gap that has
     held for two hours is no longer the event this strategy trades, and entering
     late pays the same spread for a fraction of the remaining move."""
@@ -89,12 +107,42 @@ class GapContinuation(Strategy):
     target_r: ClassVar[Decimal] = Decimal(2)
     """Profit barrier as a multiple of risk."""
 
-    def __init__(self) -> None:
-        """Start with no session traded on any instrument."""
+    def __init__(
+        self,
+        *,
+        min_gap_ranges: float = DEFAULT_MIN_GAP_RANGES,
+        entry_window_bars: int = DEFAULT_ENTRY_WINDOW_BARS,
+    ) -> None:
+        """Start with no session traded on any instrument.
+
+        Args:
+            min_gap_ranges: Band width, in mean recent session ranges. Each
+                value is its own trial; see `sweep`.
+            entry_window_bars: Bars after the open during which an entry is
+                still taken.
+
+        Example:
+            >>> GapContinuation(min_gap_ranges=1.5).min_gap_ranges
+            1.5
+        """
+        self.min_gap_ranges = min_gap_ranges
+        self.entry_window_bars = entry_window_bars
         # Per symbol, because the host subscribes one instance to the whole
         # universe. Keyed on the session date rather than a bar count so that a
         # gap in the corpus cannot reopen a session that was already traded.
         self._traded: dict[Symbol, date] = {}
+
+    @classmethod
+    def sweep(cls) -> tuple[tuple[str, Self], ...]:
+        """One variant per band width in `SWEEP_MIN_GAP_RANGES`.
+
+        Example:
+            >>> [label for label, _ in GapContinuation.sweep()]
+            ['gap>=1 ranges', 'gap>=1.2 ranges', 'gap>=1.5 ranges']
+        """
+        return tuple(
+            (f"gap>={value:g} ranges", cls(min_gap_ranges=value)) for value in SWEEP_MIN_GAP_RANGES
+        )
 
     def on_bar(self, bar: Bar, context: StrategyContext) -> Sequence[Intent]:
         """Propose a gap-continuation entry, or nothing.

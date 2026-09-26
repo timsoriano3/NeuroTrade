@@ -26,11 +26,13 @@ from neurotrade.lab.controls import momentum_bars
 from neurotrade.lab.cv import CombinatorialPurgedCV
 from neurotrade.lab.evaluation import (
     Observations,
+    Part,
     Signal,
     Variant,
     assess,
     evaluate,
     label_signals,
+    pool,
     signals_from_intents,
 )
 from neurotrade.lab.significance import sharpe_ratio
@@ -327,7 +329,7 @@ def test_every_variant_is_recorded_before_anything_is_deflated() -> None:
     ledger, store, clock = ledger_and_clock()
     evaluation = assess(
         scored,
-        variants,
+        [variant.label for variant in variants],
         family="harness-test",
         hypothesis_prefix="momentum series",
         ledger=ledger,
@@ -355,7 +357,7 @@ def test_expectancy_is_per_trade_not_per_observation() -> None:
     ledger, _, clock = ledger_and_clock()
     evaluation = assess(
         scored,
-        variants,
+        [variant.label for variant in variants],
         family="harness-test",
         hypothesis_prefix="momentum series",
         ledger=ledger,
@@ -364,7 +366,7 @@ def test_expectancy_is_per_trade_not_per_observation() -> None:
         pbo_blocks=8,
     )
     best = evaluation.best_index
-    trades = scored.trades[best]
+    trades = [touch for touch in scored.trades[best] if touch is not None]
     per_trade = sum(float(touch.realised_return) for touch in trades) / len(trades)
     column = scored.returns[best]
     per_observation = sum(column) / len(column)
@@ -381,7 +383,7 @@ def test_the_headline_variant_is_the_one_a_naive_search_would_have_reported() ->
     ledger, _, clock = ledger_and_clock()
     evaluation = assess(
         scored,
-        variants,
+        [variant.label for variant in variants],
         family="harness-test",
         hypothesis_prefix="momentum series",
         ledger=ledger,
@@ -400,7 +402,7 @@ def test_a_search_of_one_cannot_be_assessed() -> None:
     with pytest.raises(ValueError, match=r"cannot be assessed"):
         assess(
             replace(scored, returns=scored.returns[:1], trades=scored.trades[:1]),
-            variants[:1],
+            [variants[0].label],
             family="harness-test",
             hypothesis_prefix="momentum series",
             ledger=ledger,
@@ -424,7 +426,7 @@ def test_a_variant_that_never_traded_stops_the_run_rather_than_scoring_zero() ->
     with pytest.raises(ValueError, match=r"no labelled trade: never fires"):
         assess(
             scored,
-            variants,
+            [variant.label for variant in variants],
             family="harness-test",
             hypothesis_prefix="momentum series",
             ledger=ledger,
@@ -446,7 +448,7 @@ def test_too_few_observations_to_fill_the_cscv_blocks_raises() -> None:
     with pytest.raises(ValueError, match=r"cannot fill 8 CSCV blocks"):
         assess(
             scored,
-            variants,
+            [variant.label for variant in variants],
             family="harness-test",
             hypothesis_prefix="momentum series",
             ledger=ledger,
@@ -491,3 +493,69 @@ def test_a_block_the_selected_variant_sat_out_scores_no_edge_rather_than_failing
     assert all(sharpe == sharpe for sharpe in evaluation.path_sharpes)  # no NaN
     assert evaluation.n_trades == len(candidates) // 2
     assert evaluation.n_observations == len(candidates)
+
+
+# ── Pooling a universe ──────────────────────────────────────────────────
+
+
+def part(symbol: Symbol, first_ts: int) -> Part:
+    """Two labelled observations on one instrument, an hour apart."""
+    bars = [
+        Bar(
+            symbol=symbol,
+            ts_event=first_ts + step * MINUTE,
+            ts_init=first_ts + step * MINUTE,
+            interval=BarInterval.MIN_1,
+            open=Price("100"),
+            high=Price("101"),
+            low=Price("99"),
+            close=Price("100"),
+            volume=Quantity(1_000),
+        )
+        for step in range(120)
+    ]
+    variants = [uniform("a", (0, 60)), uniform("b", (0,))]
+    return Part(
+        key=str(symbol),
+        timestamps=[b.ts_event for b in bars],
+        observations=label_signals(
+            bars,
+            variants,
+            candidates=(0, 60),
+            horizon_bars=0,
+            costs=COSTS,
+            quantity=POSITION,
+        ),
+    )
+
+
+def test_pooling_orders_by_time_and_breaks_ties_on_the_symbol() -> None:
+    """At one-minute bars every instrument prints on the same tick, so a
+    time-only sort would leave the order to whichever part came first — and the
+    sample, the blocks and every statistic over them would shift with it."""
+    pooled = pool([part(MSFT, 0), part(AAPL, 0)])
+
+    assert pooled.n_observations == 4
+    assert pooled.candidates == (0, 1, 2, 3)
+    # AAPL before MSFT at each of the two shared timestamps.
+    assert [span[0] for span in pooled.spans] == [0, 0, 60 * MINUTE, 60 * MINUTE]
+    assert pooled.spans[0][1] > pooled.spans[0][0]  # spans are nanoseconds now
+
+
+def test_pooling_keeps_each_variant_in_its_own_column() -> None:
+    """A column that gathered another variant's returns would rank a strategy
+    nobody ran, and the mix is invisible in the output."""
+    pooled = pool([part(AAPL, 0), part(MSFT, 0)])
+
+    # Variant "b" fired only on the first bar of each instrument.
+    traded = [touch is not None for touch in pooled.trades[1]]
+    assert traded == [True, True, False, False]
+    assert all(touch is not None for touch in pooled.trades[0])
+
+
+def test_pooling_parts_that_disagree_on_the_variants_raises() -> None:
+    """Misaligned columns break every statistic silently."""
+    aapl, msft = part(AAPL, 0), part(MSFT, 0)
+    narrowed = replace(msft, observations=replace(msft.observations, returns=()))
+    with pytest.raises(ValueError, match=r"disagree on the number of variants"):
+        pool([aapl, narrowed])

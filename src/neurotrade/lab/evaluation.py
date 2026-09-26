@@ -45,7 +45,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
-from neurotrade.core.clock import SimClock
+from neurotrade.core.clock import Nanos, SimClock
 from neurotrade.core.costs import CostModel
 from neurotrade.core.events import Bar
 from neurotrade.core.intent import EntryTrigger, Intent
@@ -64,11 +64,13 @@ from neurotrade.lab.trials import TrialLedger
 __all__ = [
     "Evaluation",
     "Observations",
+    "Part",
     "Signal",
     "Variant",
     "assess",
     "evaluate",
     "label_signals",
+    "pool",
     "signals_from_intents",
 ]
 
@@ -140,14 +142,17 @@ class Observations:
 
     Example:
         >>> Observations(candidates=(0, 5), spans=((0, 30), (5, 35)),
-        ...              returns=((0.01, 0.0),), trades=((),), dropped=()).n_observations
+        ...              returns=((0.01, 0.0),), trades=((None, None),),
+        ...              dropped=()).n_observations
         2
     """
 
-    candidates: tuple[int, ...]  # bar indices scored, ascending
-    spans: tuple[tuple[int, int], ...]  # (opened, furthest reach) per candidate, in bar indices
+    candidates: tuple[int, ...]  # one identifier per observation, ascending; bar indices per series
+    spans: tuple[tuple[int, int], ...]  # (opened, furthest reach) per observation, in the
+    # assembler's coordinate — bar indices from `label_signals`, nanoseconds from `pool`. The
+    # embargo passed to CPCV has to be in that same unit, which is why both are chosen together.
     returns: tuple[tuple[float, ...], ...]  # per variant, aligned on candidates; 0.0 where flat
-    trades: tuple[tuple[BarrierTouch, ...], ...]  # per variant, only the decisions it took
+    trades: tuple[tuple[BarrierTouch | None, ...], ...]  # per variant, aligned; None where flat
     dropped: tuple[int, ...]  # candidates discarded: a label some variant needed could not form
 
     @property
@@ -422,19 +427,21 @@ def label_signals(
     )
 
     returns: list[tuple[float, ...]] = []
-    trades: list[tuple[BarrierTouch, ...]] = []
+    trades: list[tuple[BarrierTouch | None, ...]] = []
     for decisions in indexed:
-        earned: dict[int, float] = {}
-        taken: list[BarrierTouch] = []
+        earned: list[float] = []
+        taken: list[BarrierTouch | None] = []
         for index in kept:
             signal = decisions.get(index)
             if signal is None:
+                earned.append(0.0)
+                taken.append(None)
                 continue
             touch = touch_for(signal)
             assert touch is not None  # a candidate whose label failed was dropped above
-            earned[index] = float(touch.realised_return)
+            earned.append(float(touch.realised_return))
             taken.append(touch)
-        returns.append(tuple(earned.get(index, 0.0) for index in kept))
+        returns.append(tuple(earned))
         trades.append(tuple(taken))
 
     return Observations(
@@ -446,9 +453,100 @@ def label_signals(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Part:
+    """One instrument's contribution to a pooled sample.
+
+    Carries timestamps rather than bars so that pooling a universe does not hold
+    every instrument's series in memory at once — the corpus is minute bars, and
+    ten symbols over a year is a million of them.
+
+    Example:
+        >>> nothing = Observations(candidates=(), spans=(), returns=(), trades=(), dropped=())
+        >>> Part(key="AAPL.NASDAQ", timestamps=(1_000,), observations=nothing).key
+        'AAPL.NASDAQ'
+    """
+
+    key: str  # instrument identity; the tie-break when two entries land on one tick
+    timestamps: Sequence[Nanos]  # ts_event per bar index of that instrument's series
+    observations: Observations  # what `label_signals` produced over that series
+
+
+def pool(parts: Sequence[Part]) -> Observations:
+    """Merge several instruments' observations into one sample, ordered by time.
+
+    Cross-sectional evaluation needs this: one decision per session per symbol
+    leaves any single instrument far too thin to deflate anything, and §13's G4
+    asks about a strategy rather than about a strategy on SPY.
+
+    **Spans come out in nanoseconds**, because a bar index means nothing once two
+    series are interleaved. So the embargo passed to CPCV must be in nanoseconds
+    too — purging then correctly drops a training label that was open while a
+    *different* symbol's test block was running, which is the whole reason to
+    pool rather than to average per-symbol results.
+
+    Args:
+        parts: One per instrument, with the variants in the same order in every
+            part.
+
+    Returns:
+        One `Observations` over the union, sorted by entry time with the part's
+        key breaking ties — never by time alone: at one-minute bars every
+        instrument prints on the same tick, so a time-only sort would leave the
+        order to whichever part was iterated first. `candidates` becomes the
+        pooled position, since a per-series bar index no longer identifies an
+        observation; each part keeps its own `dropped` count.
+
+    Raises:
+        ValueError: If the parts disagree about how many variants there were —
+            the columns would not line up, and every statistic downstream
+            assumes they do.
+
+    Example:
+        >>> pool([]).n_observations
+        0
+    """
+    if not parts:
+        return Observations(candidates=(), spans=(), returns=(), trades=(), dropped=())
+    widths = {len(part.observations.returns) for part in parts}
+    if len(widths) != 1:
+        raise ValueError(f"parts disagree on the number of variants: {sorted(widths)}")
+    n_variants = widths.pop()
+
+    rows: list[tuple[Nanos, str, int, int, Nanos]] = []
+    for index, part in enumerate(parts):
+        timestamps = part.timestamps
+        for position, (opened, reach) in enumerate(part.observations.spans):
+            # A floor can push the reach past the end of the series; the last bar
+            # is the furthest the label could possibly still be open.
+            closed = timestamps[min(reach, len(timestamps) - 1)]
+            rows.append((timestamps[opened], part.key, index, position, closed))
+    rows.sort(key=lambda row: (row[0], row[1]))
+
+    returns = tuple(
+        tuple(
+            parts[part].observations.returns[variant][position] for _, _, part, position, _ in rows
+        )
+        for variant in range(n_variants)
+    )
+    trades = tuple(
+        tuple(
+            parts[part].observations.trades[variant][position] for _, _, part, position, _ in rows
+        )
+        for variant in range(n_variants)
+    )
+    return Observations(
+        candidates=tuple(range(len(rows))),
+        spans=tuple((opened, closed) for opened, _, _, _, closed in rows),
+        returns=returns,
+        trades=trades,
+        dropped=(),
+    )
+
+
 def assess(
     observations: Observations,
-    variants: Sequence[Variant],
+    labels: Sequence[str],
     *,
     family: str,
     hypothesis_prefix: str,
@@ -468,8 +566,11 @@ def assess(
     winner, not each variant.
 
     Args:
-        observations: The scored matrix from `label_signals`.
-        variants: The same variants, in the same order.
+        observations: The scored matrix from `label_signals` or `pool`.
+        labels: One per scored column, in the same order — the variants' labels.
+            Only the labels are needed: what each variant *decided* is already in
+            the matrix, and a pooled sample has no per-series signals left to
+            pass.
         family: Trial-ledger family. Deflation happens within it, so a family
             that lumps unrelated searches together deflates against noise and
             one that splits a single search across families hides its size.
@@ -497,35 +598,35 @@ def assess(
             average.
 
     Example:
-        >>> evaluation = assess(scored, variants, family="gap-continuation",  # doctest: +SKIP
+        >>> evaluation = assess(scored, labels, family="gap-continuation",  # doctest: +SKIP
         ...                     hypothesis_prefix="gap continuation on SPY 1m",
         ...                     ledger=ledger, clock=clock, cv=cv, pbo_blocks=8)
         >>> evaluation.positive_expectancy, evaluation.deflated >= 0.95  # doctest: +SKIP
         (True, False)
     """
-    if len(variants) < 2:
-        raise ValueError(f"a search of {len(variants)} variant(s) cannot be assessed; need 2+")
-    if len(variants) != len(observations.returns):
+    if len(labels) < 2:
+        raise ValueError(f"a search of {len(labels)} variant(s) cannot be assessed; need 2+")
+    if len(labels) != len(observations.returns):
         raise ValueError(
-            f"{len(variants)} variants against {len(observations.returns)} scored columns"
+            f"{len(labels)} variants against {len(observations.returns)} scored columns"
         )
     if observations.n_observations < pbo_blocks:
         raise ValueError(
             f"{observations.n_observations} observations cannot fill {pbo_blocks} CSCV blocks"
         )
     empty = [
-        variant.label
-        for variant, taken in zip(variants, observations.trades, strict=True)
-        if not taken
+        label
+        for label, taken in zip(labels, observations.trades, strict=True)
+        if not any(touch is not None for touch in taken)
     ]
     if empty:
         raise ValueError(f"variant(s) took no labelled trade: {', '.join(empty)}")
 
     returns = observations.returns
-    for variant, series in zip(variants, returns, strict=True):
+    for label, series in zip(labels, returns, strict=True):
         clock.advance_ns(1)
         ledger.record(
-            hypothesis=f"{hypothesis_prefix}: {variant.label}",
+            hypothesis=f"{hypothesis_prefix}: {label}",
             family=family,
             sharpe=sharpe_ratio(series),
             n_observations=len(series),
@@ -533,7 +634,7 @@ def assess(
             n_paths=0,
         )
 
-    best_index = max(range(len(variants)), key=lambda i: sharpe_ratio(returns[i]))
+    best_index = max(range(len(labels)), key=lambda i: sharpe_ratio(returns[i]))
     best_series = returns[best_index]
     best_sharpe = sharpe_ratio(best_series)
     shape = moments(best_series)
@@ -541,14 +642,14 @@ def assess(
     report: OverfittingReport = probability_of_backtest_overfitting(
         observations.performance(), n_blocks=pbo_blocks
     )
-    taken = observations.trades[best_index]
+    taken = tuple(touch for touch in observations.trades[best_index] if touch is not None)
 
     return Evaluation(
         family=family,
-        n_variants=len(variants),
+        n_variants=len(labels),
         n_observations=observations.n_observations,
         best_index=best_index,
-        best_label=variants[best_index].label,
+        best_label=labels[best_index],
         best_sharpe=best_sharpe,
         hurdle=ledger.hurdle(family),
         deflated=ledger.deflate(
@@ -626,7 +727,7 @@ def evaluate(
     )
     return assess(
         observations,
-        variants,
+        [variant.label for variant in variants],
         family=family,
         hypothesis_prefix=hypothesis_prefix,
         ledger=ledger,

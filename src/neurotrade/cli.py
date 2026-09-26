@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -55,6 +55,7 @@ from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.adapters.storage.parquet_store import ParquetStore
 from neurotrade.adapters.storage.schemas import Source
+from neurotrade.adapters.storage.trial_ledger import TrialLedgerStore
 from neurotrade.adapters.universe.universe_file import InvalidUniverseFile, UniverseFile
 from neurotrade.adapters.universe.universe_history_parquet import UniverseHistoryStore
 from neurotrade.config import (
@@ -66,19 +67,24 @@ from neurotrade.config import (
     describe,
     load_settings,
 )
-from neurotrade.core.clock import LiveClock, SimClock, to_datetime
+from neurotrade.core.clock import LiveClock, SimClock, to_datetime, to_nanos
+from neurotrade.core.costs import CostModel, FeeSchedule, FlooredSpread
 from neurotrade.core.events import BarInterval
 from neurotrade.core.ids import IntentId, OrderId, RunId
 from neurotrade.core.orders import Fill, Order, OrderType
 from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol, Venue
 from neurotrade.core.universe import Universe, UniverseHistory
+from neurotrade.features.indicators import indicators
 from neurotrade.ingest.actions import fetch_actions, scan_gaps
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
 from neurotrade.ingest.quality import audit_corpus, summarise
 from neurotrade.ingest.universe_history import LiquidityFloor, ScreenRules, screen_universe
 from neurotrade.lab.gate import DEFAULT_SEED, run_exit_gate
+from neurotrade.lab.measure import measure_strategy
 from neurotrade.lab.replay import ReplayEngine
+from neurotrade.lab.trials import TrialLedger
 from neurotrade.logs import configure, get_logger
+from neurotrade.strategies.plugins import arsenal
 
 __all__ = ["app"]
 
@@ -147,7 +153,9 @@ app.add_typer(actions_app, name="actions")
 corpus_app = typer.Typer(help="Corpus quality gate.", no_args_is_help=True)
 app.add_typer(corpus_app, name="corpus")
 
-lab_app = typer.Typer(help="The research lab's own gate.", no_args_is_help=True)
+lab_app = typer.Typer(
+    help="The research lab: its own gate, and strategy measurement.", no_args_is_help=True
+)
 app.add_typer(lab_app, name="lab")
 
 
@@ -1577,6 +1585,154 @@ def lab_verify(
 
     typer.echo(report.digest())
     if not report.passed:
+        raise typer.Exit(code=1)
+
+
+@lab_app.command("measure")
+def lab_measure(
+    ctx: typer.Context,
+    strategy_name: Annotated[
+        str, typer.Option("--strategy", help="Registered plugin name, e.g. gap_continuation.")
+    ],
+    start: Annotated[
+        datetime,
+        typer.Option("--start", help="First session to measure.", formats=["%Y-%m-%d"]),
+    ],
+    end: Annotated[
+        datetime | None,
+        typer.Option(
+            "--end", help="Last session, exclusive. Defaults to today.", formats=["%Y-%m-%d"]
+        ),
+    ] = None,
+    source: Annotated[
+        str,
+        typer.Option("--source", help="Which corpus root to read: ibkr, firstrate, kibot."),
+    ] = "firstrate",
+    symbols: Annotated[
+        str | None,
+        typer.Option("--symbols", help="Comma-separated tickers. Defaults to the universe."),
+    ] = None,
+    warmup_days: Annotated[
+        int,
+        typer.Option(
+            "--warmup-days",
+            help="Calendar days read into the context before --start without dispatching them.",
+        ),
+    ] = 0,
+    ledger_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--ledger",
+            help="Trial ledger to append to. Defaults to the profile's real one.",
+        ),
+    ] = None,
+    universe_path: Annotated[
+        Path, typer.Option("--universe", help="Universe file naming the instruments.")
+    ] = _DEFAULT_UNIVERSE,
+) -> None:
+    """Measure a strategy on the corpus: every variant it declares, pooled.
+
+    Runs one backtest per variant in `Strategy.sweep()` over the universe, labels
+    what each proposed with its own barriers, pools the instruments into one
+    sample and puts the search to the lab — the same measurement `lab verify`
+    trusts, so a control and a real strategy are scored by one code path.
+
+    **Every variant lands in the trial ledger**, because deflation is only honest
+    against the whole search (§17). That is why `--ledger` exists and why it is
+    explicit: pointing a throwaway run at another file is a decision worth seeing
+    on the command line, and the alternative — a flag that quietly skips the
+    record — is how a hurdle gets lowered by accident.
+
+    **Research runs ungated.** Every regime is unclassified until the Phase 5
+    HMM, so a gated run fires nowhere; the report says which way it ran.
+
+    Prints one row per instrument to stderr, then the verdict. A sample too thin
+    for the statistics reports why and exits 1 — that is a finding about the
+    corpus, not a failure of the strategy.
+
+    Example:
+        $ neurotrade lab measure --strategy gap_continuation --start 2022-09-30 \
+              --end 2023-09-30 --source firstrate
+    """
+    app_context: AppContext = ctx.obj
+    settings = app_context.settings
+
+    try:
+        cls = arsenal.get(strategy_name)
+    except KeyError as error:
+        typer.echo(
+            f"--strategy {strategy_name} is not registered; have {', '.join(arsenal.names())}",
+            err=True,
+        )
+        raise typer.Exit(code=2) from error
+
+    roots = {
+        "ibkr": settings.storage.raw_dir / "bars",
+        "firstrate": settings.storage.derived_dir / "seed" / Source.FIRSTRATE.value,
+        "kibot": settings.storage.derived_dir / "seed" / Source.KIBOT.value,
+    }
+    root = roots.get(source)
+    if root is None:
+        typer.echo(f"--source {source} is not one of {', '.join(sorted(roots))}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        universe = UniverseFile(universe_path).universe()
+    except (FileNotFoundError, InvalidUniverseFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+    wanted = universe.symbols
+    if symbols is not None:
+        tickers = {ticker.strip().upper() for ticker in symbols.split(",") if ticker.strip()}
+        wanted = tuple(symbol for symbol in wanted if symbol.ticker in tickers)
+        missing = tickers - {symbol.ticker for symbol in wanted}
+        if missing:
+            typer.echo(f"not in {universe_path.name}: {', '.join(sorted(missing))}", err=True)
+            raise typer.Exit(code=2)
+
+    first = to_nanos(start.replace(tzinfo=UTC))
+    last = to_nanos((end or datetime.now(tz=UTC)).replace(tzinfo=UTC))
+    if last <= first:
+        typer.echo(f"--end {last} is not after --start {first}", err=True)
+        raise typer.Exit(code=2)
+
+    clock = LiveClock()
+    ledger = TrialLedger(
+        store=TrialLedgerStore(ledger_path or settings.storage.trial_ledger),
+        clock=SimClock(clock.now_ns()),
+        config_hash=config_hash(settings),
+    )
+    measurement = measure_strategy(
+        cls,
+        store=ParquetStore(root, clock),
+        calendar=VenueCalendar(),
+        features=indicators,
+        symbols=wanted,
+        start=first,
+        end=last,
+        ledger=ledger,
+        clock=SimClock(clock.now_ns()),
+        costs=CostModel(spreads=FlooredSpread(), fees=FeeSchedule()),
+        quantity=Quantity(1_000),
+        warmup_ns=warmup_days * 86_400_000_000_000,
+    )
+
+    for run in measurement.runs:
+        if run.n_bars:
+            typer.echo(f"  {run}", err=True)
+    typer.echo(f"  {measurement}", err=True)
+    if measurement.evaluation is not None:
+        paths = ", ".join(f"{value:+.3f}" for value in measurement.evaluation.path_sharpes)
+        typer.echo(f"           cpcv paths: {paths}", err=True)
+        typer.echo(
+            "           n_observations counts decisions, not independent bets: "
+            f"{measurement.n_sessions} sessions carry them",
+            err=True,
+        )
+
+    typer.echo(measurement.digest)
+    if measurement.evaluation is None:
         raise typer.Exit(code=1)
 
 

@@ -39,7 +39,7 @@ from abc import ABC
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import ClassVar
+from typing import ClassVar, Self
 
 from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar, MarketSession, Quote, TickTrade
@@ -225,6 +225,32 @@ class Strategy(ABC):
     """Multiple of modelled cost this strategy's edge must clear to be worth
     trading (§5.9). A scalper needs a higher bar than a multi-hour hold, because
     it pays the spread far more often for the same gross move."""
+
+    @classmethod
+    def sweep(cls) -> tuple[tuple[str, Self], ...]:
+        """The parameter variants this strategy asks to be measured over.
+
+        **Every entry is a separate trial**, and the ledger counts it as one:
+        `min_gap_ranges` at 1.0 and at 1.2 are two hypotheses, not one strategy
+        with a knob (§17). Declaring them here is what makes the deflation
+        honest — the search a reader can reconstruct is the search that ran.
+
+        Returns:
+            `(label, strategy)` pairs. The label distinguishes the variant
+            inside its family and is what appears in the ledger, so it has to
+            name the parameter and its value rather than say "variant 2". The
+            default is a single entry using the class defaults, which
+            `lab.evaluation.assess` refuses: a search of one has no ranking to
+            test, and any strategy with a threshold in it has more than one
+            hypothesis whether or not anyone wrote them down.
+
+        Example:
+            >>> class Orb(Strategy):
+            ...     name, version = "orb", "1.0.0"
+            >>> [label for label, _ in Orb.sweep()]
+            ['default']
+        """
+        return (("default", cls()),)
 
     def is_eligible(self, regime: Regime) -> bool:
         """Whether this strategy may fire in the given regime.
