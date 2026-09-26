@@ -33,8 +33,8 @@ from typing import Final, Protocol
 
 from neurotrade.adapters.feeds.errors import FeedError
 from neurotrade.adapters.feeds.yfinance_daily import yahoo_ticker
-from neurotrade.core.actions import ONE, CorporateAction, tidy_decimal
-from neurotrade.core.types import Symbol
+from neurotrade.core.actions import ONE, CorporateAction
+from neurotrade.core.types import Symbol, tidy_decimal
 
 __all__ = [
     "ActionRow",

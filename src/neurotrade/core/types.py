@@ -13,8 +13,9 @@ and a rounding error in the twelfth decimal cannot cost money.
 **Constructing from `float` is an error.** `Decimal(0.1)` is
 `0.1000000000000000055511151231257827`, which silently poisons every downstream
 calculation. Callers pass strings, ints, or `Decimal`. Feeds that genuinely hold
-floats must go through `from_float`, which routes via `repr` and is explicit at
-the call site about where precision was last trusted.
+floats must go through `from_float`, which routes via `repr`, rounds to the
+corpus decimal scale, and is explicit at the call site about where precision was
+last trusted.
 """
 
 from __future__ import annotations
@@ -22,9 +23,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Self
+from typing import Final, Self
 
 __all__ = [
+    "CORPUS_PLACES",
     "Currency",
     "Money",
     "Price",
@@ -32,11 +34,97 @@ __all__ = [
     "Side",
     "Symbol",
     "Venue",
+    "tidy_decimal",
 ]
 
 Numeric = Decimal | int | str
 """What may become a `Decimal` without losing precision. `float` is deliberately
 absent — see the module docstring."""
+
+CORPUS_PLACES: Final = 8
+"""Decimal places a price or size is kept to — the scale of `PRICE_TYPE` and
+`QUANTITY_TYPE` in the corpus schema.
+
+Rounding here is not cosmetic. `decimal128(18, 8)` refuses a value carrying more
+places than it holds rather than rounding it ("Rescaling Decimal value would
+cause data loss"), and a float's shortest round-tripping form runs to seventeen
+places — so an unrounded feed value does not fail at the feed, it fails hours
+later when a whole window of bars is written. Eight places is four orders of
+magnitude finer than the finest tick a North American equity quotes in
+($0.0001), so nothing a feed means to say is lost."""
+
+_ONE: Final = Decimal(1)
+"""Integer scale, as `Decimal.quantize` wants it."""
+
+
+def tidy_decimal(value: Decimal, places: int) -> Decimal:
+    """Round to `places` decimals and strip trailing zeros, without going scientific.
+
+    `Decimal.normalize()` alone is not enough, and the way it fails is easy to
+    ship. It strips zeros from both sides of the point, so a ratio quantized to
+    eight places comes back readable — `Decimal("4.00000000")` becomes `4` —
+    but a *whole* number loses its zeros into the exponent: `Decimal("10.00")`
+    normalizes to `1E+1`, and `Decimal(1000) / Decimal("0.5")` is already
+    `2E+3` before anything is normalized at all.
+
+    Numerically those are all correct and every comparison still holds. What
+    breaks is everything that reads them: `str()` of a split ratio in a report,
+    a dividend written to Parquet, a doctest. Requantizing to integer scale
+    when the exponent has gone positive puts the digits back.
+
+    Args:
+        value: The number to tidy.
+        places: Maximum decimal places to keep.
+
+    Returns:
+        The same value, rounded, in plain notation.
+
+    Example:
+        >>> tidy_decimal(Decimal("4.00000000"), 8)
+        Decimal('4')
+        >>> tidy_decimal(Decimal("10.00"), 8)
+        Decimal('10')
+        >>> tidy_decimal(Decimal("0.270000"), 6)
+        Decimal('0.27')
+    """
+    normalized = value.quantize(Decimal(1).scaleb(-places)).normalize()
+    if normalized.as_tuple().exponent > 0:  # type: ignore[operator]  # never a special value here
+        return normalized.quantize(_ONE)
+    return normalized
+
+
+def _from_float(value: float, field: str) -> Decimal:
+    """Turn a feed's float into a `Decimal` the corpus can hold.
+
+    Two steps, each for a bug already paid for. `repr` first, because
+    `Decimal(0.1)` is the binary expansion and `Decimal(repr(0.1))` is `0.1`.
+    Then `tidy_decimal`, because `repr` keeps up to seventeen places and the
+    corpus column holds eight — IBKR's VWAP occasionally arrives with the full
+    double serialisation, and an unrounded one killed a running crawl at the
+    Parquet write rather than at the feed.
+
+    A non-finite value is passed through untouched so that the caller's own
+    validation reports it, instead of `quantize` raising `InvalidOperation`
+    from inside a helper.
+
+    Args:
+        value: A float from an external source, or anything `float()` accepts.
+        field: Name of the field being built, used in the error message.
+
+    Returns:
+        The float's shortest round-tripping decimal form, rounded to
+        `CORPUS_PLACES` places.
+
+    Raises:
+        ValueError: If the value is too large to hold at that scale.
+    """
+    decimal = Decimal(repr(float(value)))
+    if not decimal.is_finite():
+        return decimal
+    try:
+        return tidy_decimal(decimal, CORPUS_PLACES)
+    except InvalidOperation as exc:
+        raise ValueError(f"{field} is too large to store: {value!r}") from exc
 
 
 def _to_decimal(value: Numeric, field: str) -> Decimal:
@@ -257,13 +345,20 @@ class Price:
                 every caller remembering.
 
         Returns:
-            The price matching the float's shortest round-tripping decimal form.
+            The price matching the float's shortest round-tripping decimal form,
+            rounded to `CORPUS_PLACES` places so the corpus can store it.
+
+        Raises:
+            ValueError: If the float is not a finite, positive price, or is too
+                large to hold at the corpus scale.
 
         Example:
             >>> Price.from_float(0.1).value          # not 0.1000000000000000055…
             Decimal('0.1')
+            >>> Price.from_float(100.51660372031787).value    # an IBKR VWAP
+            Decimal('100.51660372')
         """
-        return cls(repr(float(value)))
+        return cls(_from_float(value, "Price"))
 
     def __sub__(self, other: Price) -> Decimal:
         return self.value - other.value
@@ -309,13 +404,15 @@ class Quantity:
 
     @classmethod
     def from_float(cls, value: float) -> Self:
-        """Build from a float via `repr`. See `Price.from_float`.
+        """Build from a float via `repr`, rounded. See `Price.from_float`.
 
         Example:
             >>> Quantity.from_float(1.5).value
             Decimal('1.5')
+            >>> Quantity.from_float(1 / 3).value              # not 0.3333333333333333
+            Decimal('0.33333333')
         """
-        return cls(repr(float(value)))
+        return cls(_from_float(value, "Quantity"))
 
     @property
     def is_zero(self) -> bool:

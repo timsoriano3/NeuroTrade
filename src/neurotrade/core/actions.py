@@ -60,7 +60,7 @@ from typing import Final
 
 from neurotrade.core.clock import to_datetime
 from neurotrade.core.events import Bar
-from neurotrade.core.types import Price, Quantity, Symbol
+from neurotrade.core.types import CORPUS_PLACES, Price, Quantity, Symbol, tidy_decimal
 
 __all__ = [
     "ONE",
@@ -68,21 +68,16 @@ __all__ = [
     "CorporateAction",
     "PriceGap",
     "adjust_bars",
-    "tidy_decimal",
     "unexplained_gaps",
 ]
 
 ONE: Final = Decimal(1)
 """The identity factor: no action applies, the price is already in basis."""
 
-_PLACES: Final = 8
-"""Decimal places kept by every factor and adjusted value here — the scale of
-`PRICE_TYPE` and `QUANTITY_TYPE` in the corpus schema. Rounding to it means an
-adjusted price can always be stored without Arrow refusing it for rescaling
-loss."""
-
-_QUANTUM: Final = Decimal(1).scaleb(-_PLACES)
-"""`_PLACES` as the exponent `Decimal.quantize` wants."""
+_QUANTUM: Final = Decimal(1).scaleb(-CORPUS_PLACES)
+"""The corpus scale as the exponent `Decimal.quantize` wants. Every factor and
+adjusted value here is rounded to it, so an adjusted price can always be stored
+without Arrow refusing it for rescaling loss."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,42 +331,6 @@ class AdjustmentSeries:
         return f"AdjustmentSeries({self._symbol}, {len(self._actions)} actions)"
 
 
-def tidy_decimal(value: Decimal, places: int) -> Decimal:
-    """Round to `places` decimals and strip trailing zeros, without going scientific.
-
-    `Decimal.normalize()` alone is not enough, and the way it fails is easy to
-    ship. It strips zeros from both sides of the point, so a ratio quantized to
-    eight places comes back readable — `Decimal("4.00000000")` becomes `4` —
-    but a *whole* number loses its zeros into the exponent: `Decimal("10.00")`
-    normalizes to `1E+1`, and `Decimal(1000) / Decimal("0.5")` is already
-    `2E+3` before anything is normalized at all.
-
-    Numerically those are all correct and every comparison still holds. What
-    breaks is everything that reads them: `str()` of a split ratio in a report,
-    a dividend written to Parquet, a doctest. Requantizing to integer scale
-    when the exponent has gone positive puts the digits back.
-
-    Args:
-        value: The number to tidy.
-        places: Maximum decimal places to keep.
-
-    Returns:
-        The same value, rounded, in plain notation.
-
-    Example:
-        >>> tidy_decimal(Decimal("4.00000000"), 8)
-        Decimal('4')
-        >>> tidy_decimal(Decimal("10.00"), 8)
-        Decimal('10')
-        >>> tidy_decimal(Decimal("0.270000"), 6)
-        Decimal('0.27')
-    """
-    normalized = value.quantize(Decimal(1).scaleb(-places)).normalize()
-    if normalized.as_tuple().exponent > 0:  # type: ignore[operator]  # never a special value here
-        return normalized.quantize(ONE)
-    return normalized
-
-
 def _quantize(factor: Decimal) -> Decimal:
     """Round a factor to the corpus price scale, then drop trailing zeros.
 
@@ -379,7 +338,7 @@ def _quantize(factor: Decimal) -> Decimal:
     equality with `ONE` working for the no-op case, which is what lets
     `adjust_bars` skip rebuilding a bar that needs no change.
     """
-    return tidy_decimal(factor, _PLACES)
+    return tidy_decimal(factor, CORPUS_PLACES)
 
 
 def _scale(value: Decimal) -> Decimal:

@@ -20,7 +20,6 @@ from neurotrade.core.actions import (
     CorporateAction,
     PriceGap,
     adjust_bars,
-    tidy_decimal,
     unexplained_gaps,
 )
 from neurotrade.core.events import Bar, BarInterval
@@ -310,26 +309,6 @@ def test_a_reverse_split_gap_is_caught_upward() -> None:
     bars = [bar(BASE_NS, "1"), bar(BASE_NS + DAY, "10")]
     (gap,) = unexplained_gaps(bars, AdjustmentSeries(AAPL, []), as_of=date(2023, 6, 30))
     assert gap.ratio == Decimal("10")
-
-
-# ── tidy_decimal ─────────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("value", "places", "expected"),
-    [
-        ("4.00000000", 8, "4"),
-        ("10.00", 8, "10"),
-        ("0.270000", 6, "0.27"),
-        ("2E+3", 8, "2000"),
-        ("0.25", 8, "0.25"),
-    ],
-)
-def test_tidy_decimal_never_returns_scientific_notation(
-    value: str, places: int, expected: str
-) -> None:
-    """`normalize()` alone pushes whole numbers into an exponent."""
-    assert str(tidy_decimal(Decimal(value), places)) == expected
 
 
 # ── PriceGap ─────────────────────────────────────────────────────────────────

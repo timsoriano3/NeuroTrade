@@ -16,8 +16,10 @@ qualifies a *different listing* — the same ticker in another currency at anoth
 price.
 
 **Prices arrive as floats.** They go through `Price.from_float`, which routes via
-`repr` and is the marked boundary where precision was last trusted. Everything
-downstream is exact.
+`repr`, rounds to the corpus decimal scale, and is the marked boundary where
+precision was last trusted. Everything downstream is exact. The rounding is not
+optional: IBKR's `average` is a computed double and sometimes arrives with its
+full seventeen-place serialisation, which `decimal128(18, 8)` refuses outright.
 
 Requests are paced (§12.1): IBKR permits about 60 historical requests per ten
 minutes, and exceeding it locks out further requests rather than returning a

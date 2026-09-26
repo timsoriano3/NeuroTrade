@@ -33,15 +33,10 @@ from datetime import date
 from decimal import Decimal
 from typing import Final
 
-from neurotrade.core.actions import tidy_decimal
 from neurotrade.core.calendar import TradingSession
 from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar
-from neurotrade.core.types import Price, Symbol
-
-_PRICE_PLACES = 8
-"""Decimal places a computed price keeps — the scale of `PRICE_TYPE` in the
-corpus schema, and finer than any North American tick."""
+from neurotrade.core.types import CORPUS_PLACES, Price, Symbol, tidy_decimal
 
 __all__ = [
     "OPENING_WINDOWS",
@@ -258,7 +253,7 @@ def vwap_of(total_value: Decimal, total_volume: Decimal) -> Price | None:
     """
     if total_volume == 0:
         return None
-    return Price(tidy_decimal(total_value / total_volume, _PRICE_PLACES))
+    return Price(tidy_decimal(total_value / total_volume, CORPUS_PLACES))
 
 
 def vwap_distance(price: Price, vwap: Price) -> float:
@@ -543,7 +538,7 @@ class SessionLevelTracker:
         history = self._ranges.get(symbol, ())
         if len(history) < RANGE_MEMORY:
             return None
-        return tidy_decimal(sum(history, Decimal(0)) / len(history), _PRICE_PLACES)
+        return tidy_decimal(sum(history, Decimal(0)) / len(history), CORPUS_PLACES)
 
     def __repr__(self) -> str:
         return f"SessionLevelTracker({len(self._levels)} symbols)"

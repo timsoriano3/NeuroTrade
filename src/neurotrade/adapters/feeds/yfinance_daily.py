@@ -60,15 +60,14 @@ _PRICE_DECIMALS: Final = 4
 """Decimal places Yahoo's prices are rounded to before becoming `Price`.
 
 Yahoo answers JSON float64, so a $169.34 close arrives as
-`169.33999633789062`. `Price.from_float` keeps the shortest round-tripping
-form — fourteen decimal places — which the corpus column (`decimal128(18, 8)`)
-then refuses with "Rescaling Decimal value would cause data loss".
+`169.33999633789062`. `Price.from_float` would store that — rounded to the
+corpus scale, `169.33999633` — and the corpus would accept it.
 
 Four places is the finest tick a North American equity quotes in: a penny above
 $1.00 and $0.0001 below it. Rounding there recovers the price that actually
 traded instead of preserving the float's noise, which matters because a bar
-whose close reads `169.339996` will never compare equal to IBKR's `169.34` when
-the two sources are cross-checked."""
+whose close reads `169.33999633` will never compare equal to IBKR's `169.34`
+when the two sources are cross-checked."""
 
 _VOLUME_DECIMALS: Final = 0
 """Shares are whole. Yahoo sends them as a float anyway."""

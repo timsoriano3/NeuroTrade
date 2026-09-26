@@ -246,9 +246,10 @@ def test_nothing_is_reported_unmatched_when_every_row_has_a_session() -> None:
 def test_an_impossible_bar_is_refused_by_the_domain_type() -> None:
     # Close above high. The feed does not re-check what `Bar` already checks;
     # this pins that the check is reached rather than bypassed by the float
-    # conversion.
+    # conversion. The values read `103` rather than `103.0` because
+    # `from_float` tidies trailing zeros on the way to the corpus scale.
     feed, _ = _feed([DailyRow(JULY_2, 100.0, 102.0, 99.0, 103.0, 1_000.0)])
-    with pytest.raises(ValueError, match=r"close 103\.0 outside range \[99\.0, 102\.0\]"):
+    with pytest.raises(ValueError, match=r"close 103 outside range \[99, 102\]"):
         _fetch(feed)
 
 

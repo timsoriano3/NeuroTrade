@@ -8,10 +8,11 @@ catch.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
+import pyarrow as pa
 import pytest
 from pydantic import ValidationError
 
@@ -23,6 +24,7 @@ from neurotrade.adapters.ibkr.market_data import (
     VwapDrop,
 )
 from neurotrade.adapters.ibkr.pacing import HistoricalPacer
+from neurotrade.adapters.storage.schemas import BAR_SCHEMA, Source, bar_to_row
 from neurotrade.config import IbkrSettings
 from neurotrade.core.clock import SimClock
 from neurotrade.core.events import Bar, BarInterval
@@ -190,6 +192,29 @@ async def test_ts_init_records_when_we_received_it() -> None:
     feed, _ = a_feed(bars=[a_bar(0)])
     bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
     assert bars[0].ts_init == OPEN_NS  # the SimClock's position
+
+
+# ── A VWAP with more places than the corpus holds ─────────────
+
+
+async def test_an_over_precise_vwap_is_storable_by_the_corpus() -> None:
+    """Live, 2026-09-26: a VXX crawl died at the Parquet write, not at the feed.
+
+    IBKR's `average` is a computed double, and a bar occasionally carries its
+    full seventeen-place serialisation. `PRICE_TYPE` is `decimal128(18, 8)`,
+    which refuses more places than it holds — "Rescaling Decimal value would
+    cause data loss" — so one such bar took a whole 30-day window down hours
+    into a crawl, having already written every session before it. The table
+    build asserted here is the call that actually raised.
+    """
+    feed, _ = a_feed(bars=[a_bar_with_vwap(0, average=100.51660372031787, high=100.6, low=100.4)])
+    bars = await feed.fetch_bars(AAPL, BarInterval.MIN_1, OPEN_NS, FOREVER)
+
+    assert bars[0].vwap == Price("100.51660372")
+    row = bar_to_row(
+        bars[0], source=Source.IBKR, session_date=date(2026, 3, 16), ingested_at=OPEN_NS
+    )
+    assert pa.Table.from_pylist([row], schema=BAR_SCHEMA).num_rows == 1
 
 
 # ── Venue mapping ────────────────────────────────────────────

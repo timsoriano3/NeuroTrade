@@ -20,6 +20,7 @@ from neurotrade.core.types import (
     Side,
     Symbol,
     Venue,
+    tidy_decimal,
 )
 
 # ── Side ─────────────────────────────────────────────────────
@@ -96,6 +97,38 @@ def test_price_from_float_avoids_binary_artefacts() -> None:
     assert Price.from_float(0.1).value == Decimal("0.1")
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (100.51660372031787, "100.51660372"),  # a live IBKR VWAP
+        (22.283566999999998, "22.283567"),  # a double that serialised long
+        (169.33999633789062, "169.33999634"),  # Yahoo's $169.34
+        (344.576, "344.576"),  # already short: unchanged
+    ],
+)
+def test_price_from_float_rounds_to_what_the_corpus_can_hold(value: float, expected: str) -> None:
+    """A float's shortest round-tripping form is up to seventeen places.
+
+    `decimal128(18, 8)` refuses a value with more places than it holds rather
+    than rounding it, and the refusal lands at the Parquet write — which is how
+    one over-precise IBKR VWAP killed a crawl a whole window after the bar was
+    fetched. Rounding at the boundary is what makes the value storable.
+    """
+    assert Price.from_float(value).value == Decimal(expected)
+
+
+@pytest.mark.parametrize("value", [1e30, -1e30])
+def test_price_from_float_refuses_a_value_too_large_for_the_scale(value: float) -> None:
+    """`quantize` raises `InvalidOperation` past the context precision.
+
+    A feed sending this is broken; the point is that it fails as a `ValueError`
+    naming the field, like every other bad price, rather than as a `decimal`
+    internal error from inside a helper.
+    """
+    with pytest.raises(ValueError, match="too large"):
+        Price.from_float(value)
+
+
 @pytest.mark.parametrize("bad", ["0", "-1", "-0.01"])
 def test_price_rejects_non_positive(bad: str) -> None:
     with pytest.raises(ValueError, match="positive"):
@@ -137,6 +170,12 @@ def test_decimal_arithmetic_has_no_float_drift() -> None:
 def test_quantity_allows_zero_and_fractional_shares() -> None:
     assert Quantity(0).is_zero
     assert Quantity("0.5").value == Decimal("0.5")
+
+
+def test_quantity_from_float_rounds_to_what_the_corpus_can_hold() -> None:
+    """Sizes take the same rounding as prices — `QUANTITY_TYPE` has scale 8 too."""
+    assert Quantity.from_float(1 / 3).value == Decimal("0.33333333")
+    assert Quantity.from_float(1000.0).value == Decimal("1000")  # not 1E+3
 
 
 def test_quantity_rejects_negative() -> None:
@@ -234,13 +273,31 @@ def test_from_float_handles_a_float_subclass_with_an_odd_repr() -> None:
     value = _RepresentsItselfOddly(252.11000061035156)
     assert isinstance(value, float)  # the reason it slips past the float guard
     assert "np.float64" in repr(value)  # and the reason repr() alone fails
-    assert Price.from_float(value).value == Decimal("252.11000061035156")
+    assert Price.from_float(value).value == Decimal("252.11000061")  # rounded, not raw
     assert Quantity.from_float(_RepresentsItselfOddly(1.5)).value == Decimal("1.5")
 
 
 def test_from_float_accepts_a_numpy_scalar_when_numpy_is_present() -> None:
     """The real thing, when a feed has brought numpy in."""
     numpy = pytest.importorskip("numpy")
-    assert Price.from_float(numpy.float64(252.11000061035156)).value == Decimal(
-        "252.11000061035156"
-    )
+    assert Price.from_float(numpy.float64(252.11000061035156)).value == Decimal("252.11000061")
+
+
+# ── tidy_decimal ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("value", "places", "expected"),
+    [
+        ("4.00000000", 8, "4"),
+        ("10.00", 8, "10"),
+        ("0.270000", 6, "0.27"),
+        ("2E+3", 8, "2000"),
+        ("0.25", 8, "0.25"),
+    ],
+)
+def test_tidy_decimal_never_returns_scientific_notation(
+    value: str, places: int, expected: str
+) -> None:
+    """`normalize()` alone pushes whole numbers into an exponent."""
+    assert str(tidy_decimal(Decimal(value), places)) == expected
