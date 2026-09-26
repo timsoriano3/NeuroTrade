@@ -10,14 +10,14 @@ Both controls travel the same path, and the only differences are the data and
 how hard the search looked:
 
 ```
-Crossover.on_bar  →  Intents  →  triple_barrier labels (costs inside)
-                                     ↓
-                     one shared label set, one return vector per variant
-                                     ↓
-        TrialLedger.record (every variant)  →  hurdle → deflated Sharpe → verdict
-        CombinatorialPurgedCV               →  out-of-sample path Sharpes
-        probability_of_backtest_overfitting →  PBO (reported, does not vote)
+Crossover.on_bar  →  Signals  →  lab/evaluation.py  →  ControlOutcome
 ```
+
+The measurement in the middle is **shared with the arsenal** (`lab/evaluation.py`):
+labels with costs inside, one return vector per variant, every variant recorded
+before anything is deflated, then the hurdle, the deflated Sharpe, the CPCV path
+Sharpes and PBO. That sharing is the point of the gate — a control scored by
+code the real strategies do not use proves nothing about them (§3.6).
 
 The verdict rests on the deflated Sharpe alone. PBO is computed and printed
 because §8 asks for it and it is worth seeing, but it does not separate these
@@ -46,7 +46,7 @@ from typing import Final
 from neurotrade.core.clock import SimClock
 from neurotrade.core.costs import CostModel, FeeSchedule, FlooredSpread
 from neurotrade.core.events import Bar, MarketSession
-from neurotrade.core.trials import Trial, TrialSource
+from neurotrade.core.trials import Trial
 from neurotrade.core.types import Quantity, Side
 from neurotrade.lab.controls import (
     CONTROL_SYMBOL,
@@ -59,13 +59,7 @@ from neurotrade.lab.controls import (
     sma_spec,
 )
 from neurotrade.lab.cv import CombinatorialPurgedCV
-from neurotrade.lab.labelling import label_barriers
-from neurotrade.lab.significance import (
-    OverfittingReport,
-    moments,
-    probability_of_backtest_overfitting,
-    sharpe_ratio,
-)
+from neurotrade.lab.evaluation import Signal, Variant, evaluate
 from neurotrade.lab.trials import TrialLedger
 from neurotrade.strategies.base import Regime, StrategyContext, StrategyRegistry
 
@@ -340,143 +334,79 @@ def _run_control(
 ) -> ControlOutcome:
     """Search one grid over one series and put the result to the lab.
 
-    Two label sets are computed **once** and shared by every variant, one per
-    side: the grid varies the entry rule only, so one long outcome and one short
-    outcome per candidate bar serve all of them. A variant's return at a
-    candidate is whichever of the two its side selected, or zero when it had no
-    view — the counterfactual framing of §9.3, and what makes the variants
-    comparable column by column.
+    Every variant proposes the **same** fixed barriers, so the harness resolves
+    one label per side per candidate and shares it across the whole grid: the
+    grid varies the entry rule only, and a variant's return at a candidate is
+    whichever side's outcome it selected, or zero where it had no view — the
+    counterfactual framing of §9.3, and what makes the variants comparable
+    column by column.
 
     A short is labelled on its own, not as the negative of the long: the
     barriers sit at different prices and the costs are charged on different
     levels, so `-long` would be a fiction in exactly the direction that
     flatters a strategy.
+
+    Sides falling between candidates are dropped rather than scored. The stride
+    is what keeps overlapping labels from swamping the sample, and a decision
+    the grid does not sample is not an observation any variant is measured on.
     """
-    costs = CostModel(spreads=FlooredSpread(), fees=FeeSchedule())
     candidates = tuple(range(0, len(bars) - _HORIZON_BARS - 1, _ENTRY_STRIDE))
-    outcomes: dict[Side, dict[int, float]] = {}
-    for side in (Side.BUY, Side.SELL):
-        labelled = label_barriers(
-            bars,
-            candidates,
-            side=side,
-            profit_target=_BARRIER,
-            stop_loss=_BARRIER,
-            max_bars=_HORIZON_BARS,
-            costs=costs,
-            quantity=_POSITION,
-        )
-        outcomes[side] = {index: float(touch.realised_return) for index, touch in labelled}
-
-    entries = tuple(
-        index for index in candidates if all(index in side for side in outcomes.values())
-    )
-
-    # The span is the decision's *maximum* reach, not the bar its barrier
-    # happened to touch. The two sides exit at different times, and CPCV needs
-    # one span per observation — purging to the vertical barrier is the
-    # conservative reading, and purging too much only costs training data.
-    spans = tuple((index, index + _HORIZON_BARS) for index in entries)
-
+    on_grid = frozenset(candidates)
     averages = {
         window: _sma_series(bars, window)
         for window in sorted({p.fast for p in grid} | {p.slow for p in grid})
     }
-
-    # One return vector per variant, aligned on the shared candidate set.
-    returns: list[tuple[float, ...]] = []
-    for params in grid:
-        sides = _signal_sides(bars, params, averages)
-        returns.append(
-            tuple(outcomes[sides[entry]][entry] if entry in sides else 0.0 for entry in entries)
+    variants = tuple(
+        Variant(
+            label=params.label,
+            signals=tuple(
+                Signal(
+                    index=index,
+                    side=side,
+                    profit_target=_BARRIER,
+                    stop_loss=_BARRIER,
+                    max_bars=_HORIZON_BARS,
+                )
+                for index, side in sorted(_signal_sides(bars, params, averages).items())
+                if index in on_grid
+            ),
         )
+        for params in grid
+    )
 
-    # Record every variant before deflating anything, so the candidate counts itself.
-    for params, series in zip(grid, returns, strict=True):
-        clock.advance_ns(1)
-        ledger.record(
-            hypothesis=f"{hypothesis_prefix}: {params.label}",
-            family=family,
-            sharpe=sharpe_ratio(series),
-            n_observations=len(series),
-            source=TrialSource.MANUAL,
-            n_paths=0,
-        )
-
-    best_index = max(range(len(grid)), key=lambda i: sharpe_ratio(returns[i]))
-    best_series = returns[best_index]
-    best_sharpe = sharpe_ratio(best_series)
-    shape = moments(best_series)
-
-    cv = CombinatorialPurgedCV(n_groups=_N_GROUPS, n_test_groups=_N_TEST_GROUPS, embargo=_EMBARGO)
-    path_sharpes = _path_sharpes(cv, spans, returns)
-
-    performance = tuple(tuple(series[row] for series in returns) for row in range(len(entries)))
-    report: OverfittingReport = probability_of_backtest_overfitting(
-        performance, n_blocks=_PBO_BLOCKS
+    evaluation = evaluate(
+        bars,
+        variants,
+        candidates=candidates,
+        # The span of a decision is its *maximum* reach, not the bar its barrier
+        # happened to touch: the two sides exit at different times and CPCV needs
+        # one span per observation, so purging to the vertical barrier is the
+        # conservative reading — and purging too much only costs training data.
+        horizon_bars=_HORIZON_BARS,
+        family=family,
+        hypothesis_prefix=hypothesis_prefix,
+        ledger=ledger,
+        clock=clock,
+        costs=CostModel(spreads=FlooredSpread(), fees=FeeSchedule()),
+        quantity=_POSITION,
+        cv=CombinatorialPurgedCV(
+            n_groups=_N_GROUPS, n_test_groups=_N_TEST_GROUPS, embargo=_EMBARGO
+        ),
+        pbo_blocks=_PBO_BLOCKS,
     )
 
     return ControlOutcome(
         control=control,
         family=family,
-        n_variants=len(grid),
-        n_observations=len(entries),
-        best=grid[best_index],
-        best_sharpe=best_sharpe,
-        hurdle=ledger.hurdle(family),
-        deflated=ledger.deflate(
-            best_sharpe,
-            family=family,
-            n_observations=len(best_series),
-            skew=shape.skew,
-            kurtosis=shape.kurtosis,
-        ),
-        pbo=report.pbo,
-        path_sharpes=path_sharpes,
+        n_variants=evaluation.n_variants,
+        n_observations=evaluation.n_observations,
+        best=grid[evaluation.best_index],
+        best_sharpe=evaluation.best_sharpe,
+        hurdle=evaluation.hurdle,
+        deflated=evaluation.deflated,
+        pbo=evaluation.pbo,
+        path_sharpes=evaluation.path_sharpes,
     )
-
-
-def _path_sharpes(
-    cv: CombinatorialPurgedCV,
-    spans: Sequence[tuple[int, int]],
-    returns: Sequence[Sequence[float]],
-) -> tuple[float, ...]:
-    """Out-of-sample Sharpe for each recombined CPCV path.
-
-    Selecting the parameters **is** the fitting here, so each split picks its
-    winner on the purged training observations alone and is scored on the test
-    groups it never saw. Re-dealing those test segments gives one complete
-    walk-through of the sample per path, and the spread across paths is the
-    distribution §8 asks for rather than a single lucky number.
-
-    **Expect the paths to agree on these controls, often exactly.** A path
-    covers every group once, so when every split picks the same variant — which
-    is the common case here, the selection being stable for the same
-    cost-driven reason PBO reports a stable ranking — all five paths are the
-    same series in a different order and post an identical Sharpe. The spread
-    only opens up when the splits disagree about what to fit. That is a
-    property of a two-parameter grid on one synthetic series, not of CPCV: a
-    model refitted per split, which is what Phase 2 onward will feed this,
-    varies whether or not the choice of variant does.
-    """
-    blocks = cv.groups(len(spans))
-    chosen: list[int] = []
-    for split in cv.split(spans):
-        chosen.append(
-            max(
-                range(len(returns)),
-                key=lambda i: sharpe_ratio([returns[i][index] for index in split.train]),
-            )
-        )
-
-    sharpes: list[float] = []
-    for path in cv.paths():
-        series: list[float] = []
-        for split_index, group in path:
-            variant = chosen[split_index]
-            series.extend(returns[variant][index] for index in blocks[group])
-        sharpes.append(sharpe_ratio(series))
-    return tuple(sharpes)
 
 
 def run_exit_gate(*, seed: int = DEFAULT_SEED, n_bars: int = _N_BARS) -> GateReport:

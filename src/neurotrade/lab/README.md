@@ -19,6 +19,7 @@ difference.
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
 | `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
 | `trials.py` | The ledger the deflation counts against — every hypothesis tested, by anything |
+| `evaluation.py` | Decisions in, a deflated verdict out: labels, the ledger, CPCV paths, PBO, expectancy |
 | `controls.py` | Two strategies and two synthetic series whose verdicts are known before the lab sees them |
 | `gate.py` | Gate G3 — runs both controls and fails if either verdict comes back wrong |
 
@@ -114,6 +115,40 @@ strategies exist, a strategy that starts deciding differently changes the digest
 even though the recorded data is untouched. So "did that change alter
 behaviour?" becomes a yes/no question instead of an afternoon of diffing logs.
 
+## Measuring a strategy
+
+`evaluation.py` is the one path from "what did it propose" to "does the number
+mean anything", and the arsenal and the controls both take it. A second scoring
+path would break §3.6 where it costs most: a gate trusted to reject a snooped
+control says nothing about a strategy scored by different arithmetic.
+
+```
+Intents -> Signals -> labels (costs inside) -> one return vector per variant
+        -> every variant recorded -> hurdle -> deflated Sharpe   the verdict
+        -> CPCV paths, PBO, expectancy per trade
+```
+
+Three things the caller has to decide, because none of them has a safe default:
+
+- **The candidate set.** Every fifth bar scores a variant against the
+  counterfactual "what if it had a view here", which is what makes a grid
+  comparable column by column. Only the bars something fired on scores the
+  decisions actually taken. What is never allowed is a candidate set that
+  depends on the outcome.
+- **The family.** Deflation happens within it, so a family that lumps unrelated
+  searches together deflates against noise, and one that splits a single search
+  across families hides its size.
+- **The variants.** Two, at least: CSCV and the CPCV selection both need
+  something to choose between, and a parameter value is a trial whether or not
+  anyone calls it one.
+
+Barriers come from each signal, so a strategy stopping at the session open with
+a 2R target is labelled on *its own* levels rather than a fixed percentage.
+`signals_from_intents` does that conversion and refuses a non-market entry:
+labelling a limit order as though it filled at the close asserts a fill nobody
+proved. **Expectancy is per trade, not per observation** — a sparse strategy's
+edge divided by the bars it sat out is not its edge.
+
 ## The exit gate, and why there are two controls
 
 §13's exit gate for Phase 1 asks for one thing: *the lab correctly rejects a
@@ -132,10 +167,9 @@ make verify-lab SEED=7          # any other
 | **overfit** | random walk, drift removed | 70 crossover variants, both directions | REJECTED |
 | **honest** | planted persistent drift | 4 variants, declared a priori | ACCEPTED |
 
-Both travel the identical path — `Strategy.on_bar` → intents → triple-barrier
-labels with costs inside → trial ledger → CPCV → deflated Sharpe. Only the data
-and the size of the search differ, which is what makes the comparison mean
-something.
+Both travel the identical path, and it is `evaluation.py` above — the same code
+the arsenal is scored by. Only the data and the size of the search differ, which
+is what makes the comparison mean something.
 
 Two details in the construction carry most of the weight:
 

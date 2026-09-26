@@ -47,7 +47,7 @@ rejects the first and accepts the second.
 The foundations — the vocabulary the rest of the system is written in, the
 storage it runs on, the machinery that proves a session replays exactly, and the
 broker connection it trades through, and the research lab that decides whether a
-result means anything. 1,716 tests.
+result means anything. 1,938 tests.
 
 | Area | What it does |
 |---|---|
