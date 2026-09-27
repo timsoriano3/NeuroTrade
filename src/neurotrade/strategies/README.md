@@ -15,11 +15,19 @@ filtering out the proposals that will not work.
 | `base.py` | The contract every strategy implements, and the registry that holds them |
 | `context.py` | Fills in what a strategy may see: venue phase, regime, features, session levels |
 | `arsenal.py` | The registry every plugin registers into |
+| `plugins.py` | Imports every shipped plugin, for a caller that resolves a strategy by name |
 | `gap_continuation.py` | Trades the direction of a gap too wide to expect a fill (§5.2) |
 
 One strategy exists: `gap_continuation`. The rest of the twelve chosen for Phase
 2 follow, and the plan's Tier 2 — anything cross-sectional — waits on the crawl
 delivering breadth.
+
+**A strategy declares its own search.** `Strategy.sweep()` returns one
+`(label, instance)` pair per parameter variant, and the trial ledger counts every
+one of them: `min_gap_ranges` at 1.0 and at 1.2 are two hypotheses, not one
+strategy with a knob (§17). Values are instance attributes rather than
+`ClassVar`s so that one run can measure several, and `lab/measure.py` measures
+exactly what the sweep declares — nothing else picks the grid.
 
 **Importing `arsenal.py` does not populate the arsenal.** A plugin registers when
 its own module is imported, so a run that wants one strategy imports that

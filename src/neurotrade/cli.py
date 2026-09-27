@@ -1691,13 +1691,15 @@ def lab_measure(
             typer.echo(f"not in {universe_path.name}: {', '.join(sorted(missing))}", err=True)
             raise typer.Exit(code=2)
 
+    clock = LiveClock()
     first = to_nanos(start.replace(tzinfo=UTC))
-    last = to_nanos((end or datetime.now(tz=UTC)).replace(tzinfo=UTC))
+    # Now comes from the clock, never from the OS: the wall-clock invariant holds
+    # in the CLI too, and `--end` is the only reason this command reads a date.
+    last = to_nanos(end.replace(tzinfo=UTC)) if end is not None else clock.now_ns()
     if last <= first:
         typer.echo(f"--end {last} is not after --start {first}", err=True)
         raise typer.Exit(code=2)
 
-    clock = LiveClock()
     ledger = TrialLedger(
         store=TrialLedgerStore(ledger_path or settings.storage.trial_ledger),
         clock=SimClock(clock.now_ns()),
@@ -1725,6 +1727,12 @@ def lab_measure(
     if measurement.evaluation is not None:
         paths = ", ".join(f"{value:+.3f}" for value in measurement.evaluation.path_sharpes)
         typer.echo(f"           cpcv paths: {paths}", err=True)
+        typer.echo(
+            f"           barriers: timeouts={measurement.evaluation.n_timeouts} "
+            f"ambiguous={measurement.evaluation.n_ambiguous} "
+            f"of {measurement.evaluation.n_trades} trades",
+            err=True,
+        )
         typer.echo(
             "           n_observations counts decisions, not independent bets: "
             f"{measurement.n_sessions} sessions carry them",

@@ -20,6 +20,7 @@ difference.
 | `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
 | `trials.py` | The ledger the deflation counts against — every hypothesis tested, by anything |
 | `evaluation.py` | Decisions in, a deflated verdict out: labels, the ledger, CPCV paths, PBO, expectancy |
+| `measure.py` | Runs a registered strategy over the corpus, pools the instruments, and reports the verdict |
 | `controls.py` | Two strategies and two synthetic series whose verdicts are known before the lab sees them |
 | `gate.py` | Gate G3 — runs both controls and fails if either verdict comes back wrong |
 
@@ -141,6 +142,29 @@ Three things the caller has to decide, because none of them has a safe default:
 - **The variants.** Two, at least: CSCV and the CPCV selection both need
   something to choose between, and a parameter value is a trial whether or not
   anyone calls it one.
+
+`measure.py` is that path applied to the corpus:
+
+```bash
+make measure STRATEGY=gap_continuation START=2022-09-30 END=2023-09-30 SOURCE=firstrate
+```
+
+One backtest per variant in `Strategy.sweep()`, over the **whole universe at
+once** — that is how a live host runs, one instance keeping its state per symbol,
+so measuring it per symbol would measure something else. Labelling then happens
+per instrument, because a triple barrier walks forward through one series, and
+`pool` merges the per-instrument samples into one.
+
+**Pooling is not optional.** A strategy that fires once per session per symbol
+leaves any single instrument with a few dozen decisions, which deflates nothing.
+What pooling buys is sample size, not independence: ten symbols gapping on one
+morning is one market event, so `n_sessions` is printed next to `n_observations`
+and a deflated Sharpe that treats every observation as independent is optimistic
+by roughly that ratio. Pooled spans are nanoseconds, so the CPCV embargo is too.
+
+A sample too thin for the statistics comes back as `evaluation=None` and a
+reason, and the command exits 1. That is a finding about the corpus, not a
+failure of the strategy, and it is the expected answer on a one-regime window.
 
 Barriers come from each signal, so a strategy stopping at the session open with
 a 2R target is labelled on *its own* levels rather than a fixed percentage.
