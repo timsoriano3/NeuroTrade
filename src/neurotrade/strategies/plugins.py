@@ -15,5 +15,6 @@ from __future__ import annotations
 from neurotrade.strategies.arsenal import arsenal
 from neurotrade.strategies.gap_continuation import GapContinuation
 from neurotrade.strategies.intraday_momentum import IntradayMomentum
+from neurotrade.strategies.vwap_band_reversion import VwapBandReversion
 
-__all__ = ["GapContinuation", "IntradayMomentum", "arsenal"]
+__all__ = ["GapContinuation", "IntradayMomentum", "VwapBandReversion", "arsenal"]

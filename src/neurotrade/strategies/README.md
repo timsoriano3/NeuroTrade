@@ -18,10 +18,16 @@ filtering out the proposals that will not work.
 | `plugins.py` | Imports every shipped plugin, for a caller that resolves a strategy by name |
 | `gap_continuation.py` | Trades the direction of a gap too wide to expect a fill (§5.2) |
 | `intraday_momentum.py` | Trades a half-hourly close outside the day's noise area (§5.4) |
+| `vwap_band_reversion.py` | Fades a price stretched away from session VWAP (§5.3) |
 
-Two strategies exist: `gap_continuation` and `intraday_momentum`. The rest of
-the twelve chosen for Phase 2 follow, and the plan's Tier 2 — anything
-cross-sectional — waits on the crawl delivering breadth.
+Three strategies exist: `gap_continuation`, `intraday_momentum` and
+`vwap_band_reversion`. The rest of the twelve chosen for Phase 2 follow, and the
+plan's Tier 2 — anything cross-sectional — waits on the crawl delivering breadth.
+
+The last two are deliberately each other's opposite: one buys a stretch away
+from the day's average and the other sells it. Which reading is right is a
+property of the day, so the regime declarations make them mutually exclusive
+rather than leaving the contradiction to a filter someone remembers to write.
 
 **A strategy declares its own search.** `Strategy.sweep()` returns one
 `(label, instance)` pair per parameter variant, and the trial ledger counts every

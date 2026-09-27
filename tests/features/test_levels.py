@@ -402,3 +402,57 @@ def test_a_session_that_ended_early_contributes_nothing_after_its_bell() -> None
     first = prior_sessions(tracker, profiles)
     assert live_move(tracker, first, MOVE_MEMORY + 1, [1, 2]) == pytest.approx(0.01)
     assert live_move(tracker, first, MOVE_MEMORY + 1, [3]) == pytest.approx(0.02)
+
+
+# ── The dispersion around VWAP ───────────────────────────────────────────────
+
+
+def test_the_dispersion_is_volume_weighted_and_relative_to_vwap() -> None:
+    """Equal volume at 100 and 102: a VWAP of 101 and a dispersion of 1."""
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100"), bar(2, "102")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert str(levels.vwap) == "101"
+    assert levels.vwap_sigma == pytest.approx(1 / 101)
+
+
+def test_volume_moves_the_dispersion_as_it_moves_the_average() -> None:
+    """Nine hundred shares at 100 against one hundred at 110: the outlier is
+    one tenth of the volume, so it contributes one tenth of the weight."""
+    tracker = SessionLevelTracker()
+    fold(
+        tracker,
+        [bar(1, "100", volume="900"), bar(2, "110", volume="100")],
+        session(8, first_minute=1),
+    )
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert str(levels.vwap) == "101"
+    assert levels.vwap_sigma == pytest.approx(3.0 / 101)
+
+
+def test_a_session_at_one_price_has_no_dispersion_rather_than_a_negative_one() -> None:
+    """The variance identity can land a hair below zero in decimal arithmetic."""
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100"), bar(2, "100")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert levels.vwap_sigma == 0.0
+
+
+def test_a_session_with_no_volume_has_no_dispersion() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100", volume="0")], session(8, first_minute=1))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert (levels.vwap, levels.vwap_sigma) == (None, None)
+
+
+def test_the_dispersion_resets_with_the_session() -> None:
+    tracker = SessionLevelTracker()
+    fold(tracker, [bar(1, "100"), bar(2, "102")], session(8, first_minute=1))
+    fold(tracker, [bar(400, "50"), bar(401, "50")], session(9, first_minute=400))
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    assert levels.vwap_sigma == 0.0

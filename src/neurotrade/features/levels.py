@@ -27,6 +27,7 @@ it is the one place to be careful.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -43,9 +44,11 @@ __all__ = [
     "OpeningRange",
     "SessionLevelTracker",
     "SessionLevels",
+    "dispersion_contribution",
     "opening_range",
     "session_vwap",
     "vwap_distance",
+    "vwap_sigma_of",
 ]
 
 RANGE_MEMORY: Final = 14
@@ -271,6 +274,67 @@ def vwap_of(total_value: Decimal, total_volume: Decimal) -> Price | None:
     return Price(tidy_decimal(total_value / total_volume, CORPUS_PLACES))
 
 
+def dispersion_contribution(value: Decimal, volume: Decimal) -> Decimal:
+    """What one bar adds to the volume-weighted sum of squared prices.
+
+    Takes `vwap_contribution`'s output rather than the bar, so the rule deciding
+    *which* price a bar contributes stays in one place: a dispersion measured
+    around a VWAP has to be measured on the same prices the VWAP averaged, or
+    the two disagree by an amount nobody can see.
+
+    Args:
+        value: `price * volume` for the bar, from `vwap_contribution`.
+        volume: The bar's volume, from the same call.
+
+    Returns:
+        `price**2 * volume`, recovered as `value**2 / volume`, or zero for a bar
+        with no volume.
+
+    Example:
+        >>> dispersion_contribution(Decimal(200), Decimal(2))
+        Decimal('20000')
+    """
+    if volume <= 0:
+        return Decimal(0)
+    return value * value / volume
+
+
+def vwap_sigma_of(
+    total_value: Decimal, total_volume: Decimal, total_square: Decimal
+) -> float | None:
+    """Volume-weighted dispersion of price around VWAP, as a fraction of it.
+
+    The width the "VWAP bands" of §5.3 are quoted in: a deviation of two of
+    these is the ±2 sigma the mean-reversion strategy fades. A fraction rather
+    than an absolute distance, for the reason `vwap_distance` gives — the two are
+    compared with each other, so they must share their units.
+
+    Args:
+        total_value: Accumulated `price * volume`.
+        total_volume: Accumulated volume.
+        total_square: Accumulated `price**2 * volume`.
+
+    Returns:
+        The standard deviation divided by the VWAP, or `None` when nothing has
+        traded. Computed as `E[p**2] - E[p]**2` and clamped at zero: the
+        identity is exact in theory and can land a hair below zero in decimal
+        arithmetic when every print was at one price, which `sqrt` refuses.
+
+    Example:
+        Two hundred shares at 100 and two hundred at 102: a VWAP of 101 and a
+        dispersion of exactly 1, which is 0.99% of it.
+
+        >>> sigma = vwap_sigma_of(Decimal(40400), Decimal(400), Decimal(4080800))
+        >>> round(sigma, 6)
+        0.009901
+    """
+    if total_volume <= 0:
+        return None
+    mean = total_value / total_volume
+    variance = total_square / total_volume - mean * mean
+    return math.sqrt(max(float(variance), 0.0)) / float(mean)
+
+
 def vwap_distance(price: Price, vwap: Price) -> float:
     """How far a price sits from VWAP, as a fraction of VWAP.
 
@@ -334,6 +398,10 @@ class SessionLevels:
     opening_ranges: Mapping[int, OpeningRange] = field(default_factory=dict)
     """Completed opening ranges by window, for the windows in `OPENING_WINDOWS`.
     A window appears only once it has filled — see `opening_range`."""
+
+    vwap_sigma: float | None = None
+    """Volume-weighted dispersion of price around `vwap`, as a fraction of it —
+    the unit §5.3's VWAP bands are quoted in. `None` before anything traded."""
 
     mean_abs_move_from_open: float | None = None
     """How far this instrument has typically travelled from the open by this
@@ -451,6 +519,7 @@ class SessionLevelTracker:
         "_ranges",
         "_session",
         "_session_moves",
+        "_square",
         "_value",
         "_volume",
     )
@@ -462,6 +531,7 @@ class SessionLevelTracker:
         self._ranges: dict[Symbol, list[Decimal]] = {}
         self._moves: dict[Symbol, list[dict[int, float]]] = {}
         self._session_moves: dict[Symbol, dict[int, float]] = {}
+        self._square: dict[Symbol, Decimal] = {}
         self._value: dict[Symbol, Decimal] = {}
         self._volume: dict[Symbol, Decimal] = {}
         self._opening_bars: dict[Symbol, list[Bar]] = {}
@@ -492,6 +562,7 @@ class SessionLevelTracker:
         value, volume = vwap_contribution(bar)
         self._value[symbol] += value
         self._volume[symbol] += volume
+        self._square[symbol] += dispersion_contribution(value, volume)
         opening = self._opening_bars[symbol]
         if len(opening) < OPENING_WINDOWS[-1]:
             opening.append(bar)
@@ -520,6 +591,9 @@ class SessionLevelTracker:
             low=min(previous.low, bar.low) if previous is not None else bar.low,
             close=bar.close,
             vwap=vwap_of(self._value[symbol], self._volume[symbol]),
+            vwap_sigma=vwap_sigma_of(
+                self._value[symbol], self._volume[symbol], self._square[symbol]
+            ),
             bar_count=count,
             prior_close=self._prior_close.get(symbol),
             prior_range_mean=self._range_mean(symbol),
@@ -567,6 +641,7 @@ class SessionLevelTracker:
         self._session[symbol] = session.open_ns
         self._value[symbol] = Decimal(0)
         self._volume[symbol] = Decimal(0)
+        self._square[symbol] = Decimal(0)
         self._opening_bars[symbol] = []
 
     def _range_mean(self, symbol: Symbol) -> Decimal | None:
