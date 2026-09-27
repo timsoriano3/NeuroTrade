@@ -206,7 +206,14 @@ leaves any single instrument with a few dozen decisions, which deflates nothing.
 What pooling buys is sample size, not independence: ten symbols gapping on one
 morning is one market event, so `n_sessions` is printed next to `n_observations`
 and a deflated Sharpe that treats every observation as independent is optimistic
-by roughly that ratio. Pooled spans are nanoseconds, so the CPCV embargo is too.
+by roughly that ratio. `assess` therefore takes `n_clusters` and reports a second
+deflation charged at it — `dsr_clustered`, which `measure_strategy` passes the
+session count. It is a **bound, not an estimate**: it holds the observed return
+distribution fixed and removes only the sample-size credit, so it pulls the
+confidence toward 0.5 in whichever direction it sits and can weaken a passing
+verdict but never rescue a failing one. Aggregating returns per session and
+bootstrapping whole sessions is what would measure where between the two counts
+the truth lies. Pooled spans are nanoseconds, so the CPCV embargo is too.
 
 **And pooling hides whose result it is**, which is why `lab measure` breaks the
 winning variant down per instrument and prints `concentration` — the share of its

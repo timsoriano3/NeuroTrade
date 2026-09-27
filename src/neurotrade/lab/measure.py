@@ -393,6 +393,11 @@ def measure_strategy(
         ),
         pbo_blocks=pbo_blocks,
         source=source,
+        # Ten instruments gapping on one morning is one market event, and a
+        # strategy that decides several times in a session reads that session
+        # once. Sessions are the coarsest honest grouping available here, so the
+        # verdict carries a second deflation charged at that count.
+        n_clusters=sessions if sessions >= 2 else None,
     )
     return replace(shell, evaluation=evaluation)
 

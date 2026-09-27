@@ -203,6 +203,8 @@ class Evaluation:
     hit_rate: float  # share of those trades that made money after costs
     n_timeouts: int  # trades closed by the time barrier rather than a price barrier
     n_ambiguous: int  # trades where both barriers fell in one bar; the stop was assumed
+    n_clusters: int | None = None  # independent groups the observations fall in; None if not given
+    deflated_clustered: float | None = None  # DSR recomputed at `n_clusters`; always nearer 0.5
 
     @property
     def positive_expectancy(self) -> bool:
@@ -218,13 +220,41 @@ class Evaluation:
         """Whether PBO says selecting the in-sample winner beats a coin flip."""
         return self.pbo >= 0.5
 
+    @property
+    def survives_clustering(self) -> bool:
+        """Whether the deflation still favours the result once observations cluster.
+
+        `deflated` reads every candidate as an independent bet. When the caller
+        supplies `n_clusters` it is saying they are not, and this asks whether
+        the verdict is robust to that — i.e. whether the edge is larger than the
+        bias. True when no cluster count was supplied, because then nothing
+        contradicts `deflated`.
+
+        Example:
+            >>> base = dict(family="g", n_variants=2, n_observations=200, best_index=0,
+            ...             best_label="a", best_sharpe=0.08, hurdle=0.05, pbo=0.2,
+            ...             path_sharpes=(0.06,), n_trades=180, expectancy=0.001,
+            ...             hit_rate=0.44, n_timeouts=20, n_ambiguous=3)
+            >>> Evaluation(deflated=0.99, **base).survives_clustering
+            True
+            >>> Evaluation(deflated=0.99, n_clusters=30,
+            ...            deflated_clustered=0.42, **base).survives_clustering
+            False
+        """
+        if self.deflated_clustered is None:
+            return True
+        return self.deflated_clustered >= 0.5
+
     def __str__(self) -> str:
-        return (
+        head = (
             f"{self.best_label} sharpe={self.best_sharpe:+.4f} hurdle={self.hurdle:.4f} "
             f"dsr={self.deflated:.3f} pbo={self.pbo:.3f} "
             f"exp={self.expectancy:+.5f}/trade hit={self.hit_rate:.2f} "
             f"trials={self.n_variants} obs={self.n_observations} trades={self.n_trades}"
         )
+        if self.deflated_clustered is None:
+            return head
+        return f"{head} dsr_clustered={self.deflated_clustered:.3f}"
 
 
 def signals_from_intents(bars: Sequence[Bar], intents: Sequence[Intent]) -> tuple[Signal, ...]:
@@ -555,6 +585,7 @@ def assess(
     cv: CombinatorialPurgedCV,
     pbo_blocks: int,
     source: TrialSource = TrialSource.MANUAL,
+    n_clusters: int | None = None,
 ) -> Evaluation:
     """Record the search, then deflate its winner against it.
 
@@ -584,6 +615,13 @@ def assess(
         pbo_blocks: CSCV blocks, even and at least 4.
         source: What ran the search; `DISCOVERY` for an automated sweep, which
             §17 counts exactly like a manual one.
+        n_clusters: How many *independent* groups the observations fall into,
+            when the caller knows they are not independent. At one-minute bars a
+            strategy can decide several times in one session and every decision
+            reads the same day, so the honest count is sessions rather than
+            candidates. Supplying it adds a second deflation at that count; it
+            never changes `deflated`. See `deflated_clustered` on the result for
+            why it is a bound rather than an estimate.
 
     Returns:
         The verdict.
@@ -644,6 +682,34 @@ def assess(
     )
     taken = tuple(touch for touch in observations.trades[best_index] if touch is not None)
 
+    # `deflated` below credits the result for every candidate as though each were
+    # an independent bet. At one-minute bars that is false: a strategy decides
+    # several times inside one session and every decision reads the same day. So
+    # a caller that knows the grouping gets the same deflation charged at that
+    # count instead. It is a *bound*, not an estimate — it holds the observed
+    # return distribution fixed and removes only the sample-size credit, which is
+    # the conservative end. Aggregating returns per cluster and bootstrapping
+    # whole clusters is what measures where between the two the truth sits.
+    # Removing sample-size credit pulls the confidence toward 0.5 in whichever
+    # direction it sits, so this weakens a passing verdict and cannot rescue a
+    # failing one — which is the property that makes it safe to report.
+    clustered: float | None = None
+    if n_clusters is not None:
+        if n_clusters < 2:
+            raise ValueError(f"n_clusters {n_clusters} must be at least 2")
+        if n_clusters > len(best_series):
+            raise ValueError(
+                f"n_clusters {n_clusters} exceeds {len(best_series)} observations; "
+                "clusters group observations, so there cannot be more of them"
+            )
+        clustered = ledger.deflate(
+            best_sharpe,
+            family=family,
+            n_observations=n_clusters,
+            skew=shape.skew,
+            kurtosis=shape.kurtosis,
+        )
+
     return Evaluation(
         family=family,
         n_variants=len(labels),
@@ -666,6 +732,8 @@ def assess(
         hit_rate=sum(touch.is_win for touch in taken) / len(taken),
         n_timeouts=sum(touch.label is Label.TIMEOUT for touch in taken),
         n_ambiguous=sum(touch.ambiguous for touch in taken),
+        n_clusters=n_clusters,
+        deflated_clustered=clustered,
     )
 
 
@@ -684,6 +752,7 @@ def evaluate(
     cv: CombinatorialPurgedCV,
     pbo_blocks: int,
     source: TrialSource = TrialSource.MANUAL,
+    n_clusters: int | None = None,
 ) -> Evaluation:
     """Label a search over one series and assess it, in one call.
 
@@ -706,6 +775,7 @@ def evaluate(
         cv: The CPCV design.
         pbo_blocks: CSCV blocks.
         source: What ran the search.
+        n_clusters: Independent groups the observations fall into; see `assess`.
 
     Returns:
         The verdict.
@@ -735,6 +805,7 @@ def evaluate(
         cv=cv,
         pbo_blocks=pbo_blocks,
         source=source,
+        n_clusters=n_clusters,
     )
 
 

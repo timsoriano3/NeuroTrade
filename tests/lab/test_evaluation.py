@@ -25,6 +25,7 @@ from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 from neurotrade.lab.controls import momentum_bars
 from neurotrade.lab.cv import CombinatorialPurgedCV
 from neurotrade.lab.evaluation import (
+    Evaluation,
     Observations,
     Part,
     Signal,
@@ -559,3 +560,81 @@ def test_pooling_parts_that_disagree_on_the_variants_raises() -> None:
     narrowed = replace(msft, observations=replace(msft.observations, returns=()))
     with pytest.raises(ValueError, match=r"disagree on the number of variants"):
         pool([aapl, narrowed])
+
+
+# ── Clustered deflation ─────────────────────────────────────────────────
+
+
+def assess_pair(n_clusters: int | None) -> Evaluation:
+    """The standard two-variant verdict, optionally told how observations group."""
+    variants, scored = scored_pair()
+    ledger, _store, clock = ledger_and_clock()
+    return assess(
+        scored,
+        [variant.label for variant in variants],
+        family="harness-test",
+        hypothesis_prefix="momentum series",
+        ledger=ledger,
+        clock=clock,
+        cv=CombinatorialPurgedCV(n_groups=6, n_test_groups=2, embargo=30),
+        pbo_blocks=8,
+        n_clusters=n_clusters,
+    )
+
+
+def test_a_verdict_says_nothing_about_clustering_unless_asked() -> None:
+    """Both fields stay None, and the property refuses to claim a failure."""
+    evaluation = assess_pair(None)
+    assert evaluation.n_clusters is None
+    assert evaluation.deflated_clustered is None
+    assert evaluation.survives_clustering
+    assert "dsr_clustered" not in str(evaluation)
+
+
+def test_clustering_never_moves_the_headline_deflation() -> None:
+    """`deflated` is the same number either way; the cluster count only adds one."""
+    plain = assess_pair(None)
+    clustered = assess_pair(12)
+    assert clustered.deflated == plain.deflated
+    assert clustered.best_sharpe == plain.best_sharpe
+    assert clustered.n_observations == plain.n_observations
+    assert clustered.deflated_clustered is not None
+
+
+def test_clustering_pulls_the_deflation_toward_a_coin_flip() -> None:
+    """Removing sample-size credit weakens a verdict; it cannot strengthen one.
+
+    The direction depends on which side of 0.5 the result sits, so the invariant
+    is about distance from 0.5 rather than about being smaller.
+    """
+    evaluation = assess_pair(12)
+    assert evaluation.deflated_clustered is not None
+    assert abs(evaluation.deflated_clustered - 0.5) <= abs(evaluation.deflated - 0.5)
+
+
+def test_fewer_clusters_is_a_weaker_claim_than_more() -> None:
+    """Monotone in the cluster count: coarser grouping, less confidence."""
+    coarse = assess_pair(6).deflated_clustered
+    fine = assess_pair(30).deflated_clustered
+    assert coarse is not None and fine is not None
+    assert abs(coarse - 0.5) <= abs(fine - 0.5)
+
+
+@pytest.mark.parametrize("count", [1, 0, -5])
+def test_a_cluster_count_below_two_is_refused(count: int) -> None:
+    """One group is not a sample, and the PSR cannot be evaluated at it."""
+    with pytest.raises(ValueError, match=rf"n_clusters {count} must be at least 2"):
+        assess_pair(count)
+
+
+def test_more_clusters_than_observations_is_refused() -> None:
+    """Clusters group observations, so there cannot be more of them than there are."""
+    with pytest.raises(ValueError, match=r"exceeds \d+ observations"):
+        assess_pair(10_000)
+
+
+def test_the_clustered_number_is_printed_when_it_exists() -> None:
+    """A reader must not have to ask whether the verdict was charged for clustering."""
+    evaluation = assess_pair(12)
+    assert evaluation.deflated_clustered is not None
+    assert f"dsr_clustered={evaluation.deflated_clustered:.3f}" in str(evaluation)
