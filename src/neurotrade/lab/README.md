@@ -208,6 +208,13 @@ morning is one market event, so `n_sessions` is printed next to `n_observations`
 and a deflated Sharpe that treats every observation as independent is optimistic
 by roughly that ratio. Pooled spans are nanoseconds, so the CPCV embargo is too.
 
+**And pooling hides whose result it is**, which is why `lab measure` breaks the
+winning variant down per instrument and prints `concentration` — the share of its
+trades taken on the heaviest name. `gap_continuation`'s first measurement scored
+0.46 there: 56 of 122 observations were EEM, and nothing in the output said so.
+An instrument that never traded is absent from the breakdown rather than shown as
+a zero, because it contributed nothing to the number being read.
+
 A sample too thin for the statistics comes back as `evaluation=None` and a
 reason, and the command exits 1. That is a finding about the corpus, not a
 failure of the strategy, and it is the expected answer on a one-regime window.

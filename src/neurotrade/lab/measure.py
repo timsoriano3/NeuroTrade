@@ -53,6 +53,7 @@ from neurotrade.lab.evaluation import (
     signals_from_intents,
 )
 from neurotrade.lab.feed import CorpusFeed
+from neurotrade.lab.labelling import BarrierTouch
 from neurotrade.lab.trials import TrialLedger
 from neurotrade.strategies.base import Strategy
 from neurotrade.strategies.context import MarketContext
@@ -76,7 +77,9 @@ class SymbolRun:
     """What one instrument contributed.
 
     Example:
-        >>> SymbolRun(symbol=AAPL, n_bars=0, n_signals=(0,), n_observations=0, dropped=0).traded
+        >>> run = SymbolRun(symbol=AAPL, n_bars=0, n_signals=(0,), n_observations=0, dropped=0,
+        ...                 n_trades=(0,), expectancy=(0.0,))
+        >>> run.traded
         False
     """
 
@@ -85,6 +88,8 @@ class SymbolRun:
     n_signals: tuple[int, ...]  # decisions taken, per variant, in sweep order
     n_observations: int  # candidate bars scored — the union of the variants' decisions
     dropped: int  # candidates discarded because a label could not form (end of corpus)
+    n_trades: tuple[int, ...]  # labelled trades, per variant, in sweep order
+    expectancy: tuple[float, ...]  # mean return per trade, per variant; 0.0 where it never traded
 
     @property
     def traded(self) -> bool:
@@ -130,6 +135,54 @@ class Measurement:
     def n_signals(self) -> int:
         """Decisions taken across every instrument and variant."""
         return sum(sum(run.n_signals) for run in self.runs)
+
+    def per_symbol(self) -> tuple[tuple[Symbol, int, float], ...]:
+        """The winning variant broken down by instrument, heaviest contributor first.
+
+        Pooling is mandatory — a sparse strategy fires too rarely for any single
+        instrument to deflate anything — but it hides the case where the pooled
+        number is substantially one name's. This is how that becomes visible.
+
+        Returns:
+            `(symbol, n_trades, expectancy)` per instrument that traded, sorted
+            by trade count descending then by symbol, for the variant the
+            pooled assessment picked. Empty when there is no verdict to break
+            down, since "best" is only defined by the pooled sample.
+
+        Example:
+            >>> Measurement(strategy="s", version="1.0.0", family="s", variants=("a",),
+            ...             runs=(), n_sessions=0, regime_gated=False, digest="d",
+            ...             evaluation=None, reason="no signals").per_symbol()
+            ()
+        """
+        if self.evaluation is None:
+            return ()
+        index = self.evaluation.best_index
+        found = [
+            (run.symbol, run.n_trades[index], run.expectancy[index])
+            for run in self.runs
+            if run.n_trades[index] > 0
+        ]
+        return tuple(sorted(found, key=lambda row: (-row[1], str(row[0]))))
+
+    @property
+    def concentration(self) -> float:
+        """Share of the winning variant's trades taken on its heaviest instrument.
+
+        The one number that says whether a pooled result is a market finding or
+        one name's. `gap_continuation`'s first measurement scored 0.46 — 56 of
+        122 observations were EEM — which is the reading that should have
+        stopped it being quoted as a universe result.
+
+        Returns:
+            A fraction in `(0, 1]`, or `0.0` when there is no verdict. One
+            instrument supplying everything returns `1.0`.
+        """
+        rows = self.per_symbol()
+        if not rows:
+            return 0.0
+        total = sum(count for _, count, _ in rows)
+        return rows[0][1] / total if total else 0.0
 
     def __str__(self) -> str:
         head = f"{self.strategy}@{self.version} [{', '.join(self.variants)}]"
@@ -245,6 +298,8 @@ def measure_strategy(
                     n_signals=tuple(0 for _ in labels),
                     n_observations=0,
                     dropped=0,
+                    n_trades=tuple(0 for _ in labels),
+                    expectancy=tuple(0.0 for _ in labels),
                 )
             )
             continue
@@ -263,6 +318,8 @@ def measure_strategy(
                     n_signals=counts,
                     n_observations=0,
                     dropped=0,
+                    n_trades=tuple(0 for _ in labels),
+                    expectancy=tuple(0.0 for _ in labels),
                 )
             )
             continue
@@ -285,6 +342,11 @@ def measure_strategy(
                 observations=observations,
             )
         )
+        # Per instrument, per variant: what it actually earned. Pooling is what
+        # makes the verdict, but a pooled number that is really one instrument's
+        # is the failure mode pooling hides — `gap_continuation`'s first result
+        # took 56 of its 122 observations from EEM alone.
+        per_variant = tuple(_expectancy(column) for column in observations.trades)
         runs.append(
             SymbolRun(
                 symbol=symbol,
@@ -292,6 +354,8 @@ def measure_strategy(
                 n_signals=counts,
                 n_observations=observations.n_observations,
                 dropped=len(observations.dropped),
+                n_trades=tuple(count for count, _ in per_variant),
+                expectancy=tuple(value for _, value in per_variant),
             )
         )
 
@@ -331,6 +395,30 @@ def measure_strategy(
         source=source,
     )
     return replace(shell, evaluation=evaluation)
+
+
+def _expectancy(column: Sequence[BarrierTouch | None]) -> tuple[int, float]:
+    """Trade count and mean net return per trade, for one variant on one instrument.
+
+    Args:
+        column: That variant's labels, aligned on candidates, `None` where it
+            had no view.
+
+    Returns:
+        `(n_trades, expectancy)`. A variant that never traded here returns
+        `(0, 0.0)` — not a mean of an empty sample, and not `nan`, which would
+        propagate silently into the printed table.
+
+    Example:
+        >>> _expectancy([None, None])
+        (0, 0.0)
+    """
+    touches = [touch for touch in column if touch is not None]
+    if not touches:
+        return (0, 0.0)
+    # float, matching `Evaluation.expectancy`: this is a reported statistic, not
+    # a price or a P&L that the Decimal invariant governs.
+    return (len(touches), float(sum(touch.realised_return for touch in touches) / len(touches)))
 
 
 def _why_not(

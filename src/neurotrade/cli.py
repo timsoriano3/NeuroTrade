@@ -1812,6 +1812,22 @@ def lab_measure(
             f"{measurement.n_sessions} sessions carry them",
             err=True,
         )
+        rows = measurement.per_symbol()
+        if rows:
+            # A pooled verdict can be one instrument's. Printing the breakdown
+            # beside the headline is what stops it being read as a universe
+            # result — see `Measurement.concentration`.
+            typer.echo(
+                f"           {measurement.evaluation.best_label} per instrument "
+                f"({len(rows)} traded, top name holds {measurement.concentration:.0%} "
+                "of its trades):",
+                err=True,
+            )
+            for symbol, n_trades, expectancy in rows:
+                typer.echo(
+                    f"             {symbol!s:<14} trades={n_trades:<5} exp={expectancy:+.5f}",
+                    err=True,
+                )
 
     typer.echo(measurement.digest)
     if measurement.evaluation is None:

@@ -140,11 +140,15 @@ def measure(
     symbols: Sequence[Symbol] | None = None,
     pbo_blocks: int = 4,
     n_groups: int = 4,
+    start: int | None = None,
+    warmup_ns: int = 0,
 ) -> tuple[Measurement, MemoryLedger]:
     """Run a measurement over a synthetic corpus, on a throwaway ledger."""
     store = MemoryLedger()
     ledger = TrialLedger(store=store, clock=SimClock(1_000), config_hash="cfg_test")
-    first = min(b.ts_event for series in bars.values() for b in series)
+    first = (
+        start if start is not None else min(b.ts_event for series in bars.values() for b in series)
+    )
     last = max(b.ts_event for series in bars.values() for b in series) + MINUTE
     measurement = measure_strategy(
         strategy,
@@ -162,6 +166,7 @@ def measure(
         n_groups=n_groups,
         n_test_groups=2,
         embargo_ns=MINUTE,
+        warmup_ns=warmup_ns,
     )
     return measurement, store
 
@@ -280,3 +285,93 @@ def test_a_limit_entry_cannot_be_measured_this_way() -> None:
 
     with pytest.raises(ValueError, match=r"only MARKET can be labelled"):
         measure(Limiter, {AAPL: gapping_series(AAPL)})
+
+
+# ── The pooled number, broken down by instrument ────────────────────────
+
+
+def test_the_winning_variant_is_broken_down_per_instrument() -> None:
+    """Pooling makes the verdict; this is what says whose verdict it is.
+
+    `gap_continuation`'s first real measurement took 56 of its 122 observations
+    from EEM alone, and nothing in the output said so.
+    """
+    long, short = gapping_series(AAPL), gapping_series(MSFT)[: 17 * BARS_PER_SESSION]
+    measurement, _ = measure(GapContinuation, {AAPL: long, MSFT: short})
+    assert measurement.evaluation is not None, measurement.reason
+
+    rows = measurement.per_symbol()
+    assert [str(symbol) for symbol, _, _ in rows] == ["AAPL.NASDAQ", "MSFT.NASDAQ"]
+    aapl_trades, msft_trades = rows[0][1], rows[1][1]
+    assert aapl_trades > msft_trades > 0
+    # The breakdown must add up to what the headline counted.
+    assert aapl_trades + msft_trades == measurement.evaluation.n_trades
+
+
+def test_concentration_is_the_top_instruments_share_of_the_trades() -> None:
+    long, short = gapping_series(AAPL), gapping_series(MSFT)[: 17 * BARS_PER_SESSION]
+    measurement, _ = measure(GapContinuation, {AAPL: long, MSFT: short})
+    rows = measurement.per_symbol()
+    total = sum(count for _, count, _ in rows)
+    assert measurement.concentration == pytest.approx(rows[0][1] / total)
+    assert 0.5 <= measurement.concentration < 1.0  # AAPL leads but does not supply all
+
+
+def test_one_instrument_supplying_everything_scores_full_concentration() -> None:
+    """The reading that should stop a single-name result being quoted as a universe one."""
+    measurement, _ = measure(GapContinuation, {AAPL: gapping_series(AAPL)})
+    assert measurement.is_measured, measurement.reason
+    assert measurement.concentration == 1.0
+    assert len(measurement.per_symbol()) == 1
+
+
+def test_an_instrument_that_never_traded_is_absent_from_the_breakdown() -> None:
+    """Absent, not a zero row: it contributed nothing to the number being read."""
+    measurement, _ = measure(
+        GapContinuation,
+        {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT)[:BARS_PER_SESSION]},
+    )
+    assert measurement.is_measured, measurement.reason
+    traded = {str(symbol) for symbol, _, _ in measurement.per_symbol()}
+    assert "MSFT.NASDAQ" not in traded
+
+
+def test_there_is_no_breakdown_without_a_verdict() -> None:
+    """ "Best" is only defined by the pooled sample, so there is no column to pick."""
+    measurement, _ = measure(Silent, {AAPL: gapping_series(AAPL)})
+    assert not measurement.is_measured
+    assert measurement.per_symbol() == ()
+    assert measurement.concentration == 0.0
+
+
+# ── Warm-up ─────────────────────────────────────────────────────────────
+
+
+def test_warmup_lets_a_strategy_fire_in_the_first_sessions_of_a_window() -> None:
+    """The documented gap: without it, 14 sessions of every window are silent.
+
+    `gap_continuation` has no band until `RANGE_MEMORY` sessions have completed,
+    so a window that starts cold produces nothing from its own first sessions.
+    Feeding the preceding span into the context — never onto the bus — is what
+    makes the early part of a window measurable.
+    """
+    bars = gapping_series(AAPL)
+    session = CALENDAR.session(Venue.NASDAQ, SESSIONS[15])
+    assert session is not None
+    late = session.open_ns
+
+    cold, _ = measure(GapContinuation, {AAPL: bars}, start=late)
+    warm, _ = measure(GapContinuation, {AAPL: bars}, start=late, warmup_ns=20 * 86_400_000_000_000)
+    assert cold.n_signals == 0
+    assert warm.n_signals > 0
+
+
+def test_warmup_bars_are_not_counted_as_read() -> None:
+    """They reach the context, not the bus — so they are not part of the sample."""
+    bars = gapping_series(AAPL)
+    session = CALENDAR.session(Venue.NASDAQ, SESSIONS[15])
+    assert session is not None
+    warm, _ = measure(
+        GapContinuation, {AAPL: bars}, start=session.open_ns, warmup_ns=20 * 86_400_000_000_000
+    )
+    assert warm.runs[0].n_bars < len(bars)
