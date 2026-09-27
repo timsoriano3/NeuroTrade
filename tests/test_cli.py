@@ -33,7 +33,7 @@ from neurotrade.adapters.ibkr.connection import IbkrConnectionError
 from neurotrade.adapters.ibkr.market_data import VwapDrop
 from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.adapters.storage.parquet_store import ParquetStore
-from neurotrade.cli import _SEED_PROVENANCE, _seed_feed, _SeedJob, app
+from neurotrade.cli import _SEED_PROVENANCE, PRE_ADJUSTED_SOURCES, _seed_feed, _SeedJob, app
 from neurotrade.config import Profile, config_hash, load_settings
 from neurotrade.core.clock import LiveClock, SimClock, to_nanos
 from neurotrade.core.events import Bar, BarInterval, Event
@@ -1535,3 +1535,29 @@ def test_daily_backfill_rejects_a_missing_universe_file(
 
     assert result.exit_code == 2
     assert "not found" in result.stderr
+
+
+# ── Which sources arrive split-adjusted ──────────────────────
+
+
+def test_ibkr_is_recorded_as_arriving_split_adjusted() -> None:
+    """Measured, not assumed — and the direction of the error is asymmetric.
+
+    IBKR adjusts history before we see it: across NVDA's 10:1 on 2024-06-10 the
+    raw corpus goes 120.87 -> 121.65, +0.65%. Adjusting it again turns that into
+    +906%, which the labeller cannot detect any more than it can detect a
+    missing adjustment. The constant is what stops a future source being added
+    without answering the question.
+    """
+    assert PRE_ADJUSTED_SOURCES["ibkr"] is True
+
+
+def test_the_seed_vendors_are_recorded_as_unadjusted() -> None:
+    """Their files are named `_unadjusted`; no split falls in the window they cover."""
+    assert PRE_ADJUSTED_SOURCES["firstrate"] is False
+    assert PRE_ADJUSTED_SOURCES["kibot"] is False
+
+
+def test_every_measurable_source_declares_a_basis() -> None:
+    """A source with a corpus root but no entry here would raise at measure time."""
+    assert set(PRE_ADJUSTED_SOURCES) == {"ibkr", "firstrate", "kibot"}

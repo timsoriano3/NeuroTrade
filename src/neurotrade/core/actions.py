@@ -51,7 +51,7 @@ therefore **required**, never "today".
 from __future__ import annotations
 
 import bisect
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
@@ -68,6 +68,7 @@ __all__ = [
     "CorporateAction",
     "PriceGap",
     "adjust_bars",
+    "adjust_stream",
     "unexplained_gaps",
 ]
 
@@ -384,7 +385,8 @@ def adjust_bars(
 
     Returns:
         New bars, in the order given. Bars needing no adjustment are returned
-        unchanged rather than rebuilt.
+        unchanged rather than rebuilt. `adjust_stream` is the same work lazily,
+        and this is a `tuple()` of it.
 
     Raises:
         ValueError: If a bar belongs to a different instrument than the series.
@@ -404,7 +406,62 @@ def adjust_bars(
         >>> (str(adjusted[0].close), str(adjusted[0].volume))
         ('51.00000000', '2000.00000000')
     """
-    out: list[Bar] = []
+    return tuple(adjust_stream(bars, series, as_of=as_of, total_return=total_return))
+
+
+def adjust_stream(
+    bars: Iterable[Bar],
+    series: AdjustmentSeries,
+    *,
+    as_of: date,
+    total_return: bool = False,
+) -> Iterator[Bar]:
+    """Adjust bars one at a time, without holding the series in memory.
+
+    The same work as `adjust_bars`, which is a `tuple()` of this — the two share
+    one implementation rather than being trusted to agree, for the reason the
+    session levels share `vwap_contribution`: a batch path and a streaming path
+    that drift apart produce research numbers the live system cannot reproduce,
+    and no single-bar test notices.
+
+    Streaming is what a corpus read needs. A universe of 58 instruments over
+    2.6 years of one-minute bars is ~15M bars; materialising a symbol's whole
+    range to rescale it would undo the laziness `lab/feed.py` is built on.
+
+    Args:
+        bars: Bars for one instrument, any order. `ts_event` is the bar's
+            close, so its session is taken from that timestamp's date.
+        series: Actions for that same instrument.
+        as_of: Basis to express prices in. Actions after it are ignored.
+        total_return: Adjust for dividends as well as splits. Leave false for
+            anything that decides a barrier touch; see the module docstring.
+
+    Yields:
+        One bar per bar given, in order. A bar needing no adjustment is yielded
+        **unchanged** — the identical object, so a caller may test `out is bar`
+        to learn whether anything applied.
+
+    Raises:
+        ValueError: If a bar belongs to a different instrument than the series.
+
+    Example:
+        A 2:1 split halves the prices before it and leaves later ones alone.
+
+        >>> from neurotrade.core.events import Bar, BarInterval
+        >>> from neurotrade.core.types import Quantity, Venue
+        >>> t = Symbol("T", Venue.NYSE)
+        >>> def bar(ns):
+        ...     return Bar(symbol=t, ts_event=ns, ts_init=ns, interval=BarInterval.DAY_1,
+        ...                open=Price("100"), high=Price("104"), low=Price("99"),
+        ...                close=Price("102"), volume=Quantity(1_000))
+        >>> series = AdjustmentSeries(t, [CorporateAction(t, date(2023, 6, 2), Decimal(2))])
+        >>> before = bar(1_685_649_600_000_000_000)   # 2023-06-01, before the split
+        >>> after = bar(1_686_081_600_000_000_000)    # 2023-06-06, already in basis
+        >>> for out in adjust_stream([before, after], series, as_of=date(2023, 6, 9)):
+        ...     print(out.close, out is after)
+        51.00000000 False
+        102 True
+    """
     for bar in bars:
         if bar.symbol != series.symbol:
             raise ValueError(f"bar for {bar.symbol} adjusted with series for {series.symbol}")
@@ -415,24 +472,21 @@ def adjust_bars(
             else series.price_factor(observed, as_of=as_of)
         )
         if factor == ONE:
-            out.append(bar)
+            yield bar
             continue
         # Volume follows the split, not the dividend: a cash payment leaves the
         # share count untouched. Hence the split-only factor here even when the
         # prices are being adjusted for total return.
         split_factor = series.price_factor(observed, as_of=as_of)
-        out.append(
-            replace(
-                bar,
-                open=Price(_scale(bar.open.value * factor)),
-                high=Price(_scale(bar.high.value * factor)),
-                low=Price(_scale(bar.low.value * factor)),
-                close=Price(_scale(bar.close.value * factor)),
-                volume=Quantity(_scale(bar.volume.value / split_factor)),
-                vwap=None if bar.vwap is None else Price(_scale(bar.vwap.value * factor)),
-            )
+        yield replace(
+            bar,
+            open=Price(_scale(bar.open.value * factor)),
+            high=Price(_scale(bar.high.value * factor)),
+            low=Price(_scale(bar.low.value * factor)),
+            close=Price(_scale(bar.close.value * factor)),
+            volume=Quantity(_scale(bar.volume.value / split_factor)),
+            vwap=None if bar.vwap is None else Price(_scale(bar.vwap.value * factor)),
         )
-    return tuple(out)
 
 
 def unexplained_gaps(

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 import typer
 
@@ -67,11 +67,13 @@ from neurotrade.config import (
     describe,
     load_settings,
 )
+from neurotrade.core.actions import AdjustmentSeries
 from neurotrade.core.clock import LiveClock, SimClock, to_datetime, to_nanos
 from neurotrade.core.costs import CostModel, FeeSchedule, FlooredSpread
 from neurotrade.core.events import BarInterval
 from neurotrade.core.ids import IntentId, OrderId, RunId
 from neurotrade.core.orders import Fill, Order, OrderType
+from neurotrade.core.ports import StoragePort
 from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol, Venue
 from neurotrade.core.universe import Universe, UniverseHistory
 from neurotrade.features.indicators import indicators
@@ -79,6 +81,7 @@ from neurotrade.ingest.actions import fetch_actions, scan_gaps
 from neurotrade.ingest.crawler import CellOutcome, CellStatus, CrawlReport, crawl
 from neurotrade.ingest.quality import audit_corpus, summarise
 from neurotrade.ingest.universe_history import LiquidityFloor, ScreenRules, screen_universe
+from neurotrade.lab.feed import AdjustingStore
 from neurotrade.lab.gate import DEFAULT_SEED, run_exit_gate
 from neurotrade.lab.measure import measure_strategy
 from neurotrade.lab.replay import ReplayEngine
@@ -1588,6 +1591,41 @@ def lab_verify(
         raise typer.Exit(code=1)
 
 
+PRE_ADJUSTED_SOURCES: Final[Mapping[str, bool]] = {
+    "ibkr": True,
+    "firstrate": False,
+    "kibot": False,
+}
+"""Whether a corpus source hands us prices already on one split basis.
+
+The answer decides whether adjusting is the fix or the bug, so it is recorded per
+source rather than assumed once. **IBKR adjusts before we see the data.** Measured
+on the three splits inside the crawled range that have a prior session in the
+corpus, the overnight move across the split is an ordinary one, not a cliff:
+
+| Symbol | Effective | Ratio | Prior close | Split close | Overnight |
+|---|---|---|---|---|---|
+| NVDA | 2024-06-10 | 10:1 | 120.87 | 121.65 | +0.65% |
+| CNQ | 2024-06-11 | 2:1 | 48.805 | 48.94 | +0.28% |
+| NFLX | 2025-11-17 | 10:1 | 111.26 | 110.37 | -0.80% |
+
+Pre-split NVDA traded near 1,200, so 120.87 is already the post-split basis.
+Applying a factor on top would *introduce* a 906% overnight rise — the mirror
+image of the defect, and just as invisible to the labeller.
+
+The seed vendors ship files named `_unadjusted`, so they are read through
+`AdjustingStore`. That rests on the filename rather than on a measurement,
+because **no split falls in the single window they cover** — which also makes it
+a no-op either way today, and is why `gap_continuation` reproduces its recorded
+digest through the wrapper unchanged.
+
+**The residual risk is a mixed basis, not a missing one.** IBKR adjusts as of when
+the request is served, so a resumable crawl spanning a *future* split holds the
+windows fetched before it in the old basis and the rest in the new, for one
+symbol. Nothing here detects that; `unexplained_gaps` is the tool for it, and
+today only `actions check` runs it, on daily bars."""
+
+
 @lab_app.command("measure")
 def lab_measure(
     ctx: typer.Context,
@@ -1650,6 +1688,15 @@ def lab_measure(
     for the statistics reports why and exits 1 — that is a finding about the
     corpus, not a failure of the strategy.
 
+    **Which split basis the prices are on is reported, not assumed.** `ibkr`
+    adjusts before we see the data, so no factor is applied; the seed vendors
+    ship unadjusted files, so those are read through `AdjustingStore` and need
+    the corporate-action set to exist — without it, `actions fetch` never having
+    run is indistinguishable from nothing ever having split, so a missing file
+    exits 2 rather than measuring. Either way the basis is printed, because an
+    unadjusted 10:1 is a 90% overnight fall and adjusting an already-adjusted
+    one is a 906% rise, and the labeller can detect neither.
+
     Example:
         $ neurotrade lab measure --strategy gap_continuation --start 2022-09-30 \
               --end 2023-09-30 --source firstrate
@@ -1675,6 +1722,7 @@ def lab_measure(
     if root is None:
         typer.echo(f"--source {source} is not one of {', '.join(sorted(roots))}", err=True)
         raise typer.Exit(code=2)
+    pre_adjusted = PRE_ADJUSTED_SOURCES[source]
 
     try:
         universe = UniverseFile(universe_path).universe()
@@ -1705,9 +1753,35 @@ def lab_measure(
         clock=SimClock(clock.now_ns()),
         config_hash=config_hash(settings),
     )
+    # Which basis the prices are on is stated either way, never left implied:
+    # the labeller cannot detect an unadjusted series, so silence here is how a
+    # 10:1 split becomes the largest gap in the window on one source and a 906%
+    # artefact on another.
+    corpus: StoragePort = ParquetStore(root, clock)
+    if pre_adjusted:
+        typer.echo(f"  {source} prices arrive split-adjusted; applying no factor", err=True)
+    else:
+        actions_root = settings.storage.derived_dir / "actions" / Source.YFINANCE.value
+        try:
+            known = ActionStore(actions_root).read()
+        except (FileNotFoundError, ValueError) as error:
+            # A missing file would otherwise read as "nothing ever split".
+            typer.echo(f"{error} — run `make actions` before measuring", err=True)
+            raise typer.Exit(code=2) from error
+        adjusting = AdjustingStore(
+            corpus,
+            {symbol: AdjustmentSeries(symbol, known.get(symbol, ())) for symbol in wanted},
+            as_of=to_datetime(last).date(),
+        )
+        splits = adjusting.splits_in_force(since=to_datetime(first).date())
+        typer.echo(f"  adjusting {source} for {len(splits)} split(s) in the window", err=True)
+        for symbol, action in splits:
+            typer.echo(f"    {symbol} {action}", err=True)
+        corpus = adjusting
+
     measurement = measure_strategy(
         cls,
-        store=ParquetStore(root, clock),
+        store=corpus,
         calendar=VenueCalendar(),
         features=indicators,
         symbols=wanted,

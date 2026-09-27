@@ -13,7 +13,7 @@ difference.
 |---|---|
 | `drive.py` | The loop both runners share: clock, bus, run digest |
 | `replay.py` | Replays a recorded session and proves the replay was faithful |
-| `feed.py` | The corpus as one ts-ordered bar stream, merged across a universe |
+| `feed.py` | The corpus as one ts-ordered bar stream, merged across a universe, split-adjusted on the way out |
 | `engine.py` | Runs strategies over that stream and collects their intents |
 | `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
@@ -115,6 +115,52 @@ The useful part is that the digest covers **outputs as well as inputs**. Once
 strategies exist, a strategy that starts deciding differently changes the digest
 even though the recorded data is untouched. So "did that change alter
 behaviour?" becomes a yes/no question instead of an afternoon of diffing logs.
+
+## Which split basis the prices are on, per source
+
+`labelling.py` says in its own docstring that prices must arrive split-adjusted
+and that **nothing there can detect that it was not done**. The same is true of
+the opposite mistake, and the two are symmetric: an unadjusted 10-for-1 split is
+a 90% overnight fall, and adjusting one that was already adjusted is a 906% rise.
+Either way `prior_close` reads the largest move in the corpus, the noise band
+built from it explodes, and every stop between the two sessions is trodden
+through. So the basis is recorded per source in `PRE_ADJUSTED_SOURCES` and
+printed by every run, rather than left to a caller's memory.
+
+**IBKR adjusts before we see the data** — measured, on the three splits inside
+the crawled range that have a prior session in the corpus:
+
+| Symbol | Effective | Ratio | Prior close | Split close | Overnight |
+|---|---|---|---|---|---|
+| NVDA | 2024-06-10 | 10:1 | 120.87 | 121.65 | +0.65% |
+| CNQ | 2024-06-11 | 2:1 | 48.805 | 48.94 | +0.28% |
+| NFLX | 2025-11-17 | 10:1 | 111.26 | 110.37 | -0.80% |
+
+Pre-split NVDA traded near $1,200, so 120.87 is already the post-split basis. So
+`--source ibkr` applies no factor. The seed vendors ship `_unadjusted` files and
+are read through `AdjustingStore`; no split falls in the one window they cover,
+so that is a no-op either way today, which is why `gap_continuation` reproduces
+its recorded digest through the wrapper unchanged.
+
+`AdjustingStore` is the adjustment itself: a `StoragePort` wrapping another one,
+rescaling each bar into one basis as it is read. `raw/` stays immutable and
+nothing downstream changes — `merge_bars`, `CorpusFeed`, `measure_strategy` and
+the gate all take a port and cannot tell which they were given. Adjusting on read
+rather than materialising a `derived/bars/` corpus is deliberate: an adjusted
+corpus on disk freezes the basis it was built in, so the next split silently
+makes every file stale, and a basis chosen per run is the honest one — `as_of` is
+a parameter of the question being asked.
+
+Two things it deliberately does not do. It never writes: adjusted prices carry a
+basis the corpus does not record, so `write_bars` raises. And it adjusts **splits
+only** — `total_return` defaults to false, because these prices decide barrier
+touches and a dividend-adjusted series moves a stop the market never moved.
+
+**The residual risk is a mixed basis, not a missing one.** IBKR adjusts as of
+when the request is served, so a resumable crawl spanning a *future* split holds
+the windows fetched before it in the old basis and the rest in the new, for one
+symbol. Nothing above detects that. `unexplained_gaps` in `core/actions.py` is
+the tool for it, and today only `neurotrade actions check` runs it, on daily bars.
 
 ## Measuring a strategy
 

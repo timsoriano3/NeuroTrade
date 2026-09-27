@@ -200,7 +200,7 @@ verify-lab: ## Prove gate G3: the lab rejects a snooped result, accepts a real o
 	@$(PY) neurotrade --profile $(PROFILE) lab verify \
 	   $(if $(SEED),--seed $(SEED),) $(if $(BARS),--bars $(BARS),)
 
-measure: ## Measure a strategy on the corpus. STRATEGY= START=YYYY-MM-DD [END= SOURCE= SYMBOLS= WARMUP= LEDGER=]
+measure: ## Measure a strategy on the corpus; prints the split basis. STRATEGY= START=YYYY-MM-DD [END= SOURCE= SYMBOLS= WARMUP= LEDGER=]
 	@if [ -z "$(STRATEGY)" ]; then echo 'STRATEGY=<name> is required'; exit 2; fi
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
 	$(PY) neurotrade --profile $(PROFILE) lab measure --strategy $(STRATEGY) --start $(START) \
