@@ -17,10 +17,11 @@ filtering out the proposals that will not work.
 | `arsenal.py` | The registry every plugin registers into |
 | `plugins.py` | Imports every shipped plugin, for a caller that resolves a strategy by name |
 | `gap_continuation.py` | Trades the direction of a gap too wide to expect a fill (§5.2) |
+| `intraday_momentum.py` | Trades a half-hourly close outside the day's noise area (§5.4) |
 
-One strategy exists: `gap_continuation`. The rest of the twelve chosen for Phase
-2 follow, and the plan's Tier 2 — anything cross-sectional — waits on the crawl
-delivering breadth.
+Two strategies exist: `gap_continuation` and `intraday_momentum`. The rest of
+the twelve chosen for Phase 2 follow, and the plan's Tier 2 — anything
+cross-sectional — waits on the crawl delivering breadth.
 
 **A strategy declares its own search.** `Strategy.sweep()` returns one
 `(label, instance)` pair per parameter variant, and the trial ledger counts every

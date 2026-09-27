@@ -57,6 +57,21 @@ quoted in ATR units. It is a *daily* scale on purpose: the corpus feeds minute
 bars, and an overnight gap measured in minute-ATR units is a three-digit number
 that no published threshold applies to."""
 
+MOVE_MEMORY: Final = 14
+"""Completed sessions averaged into `mean_abs_move_from_open`.
+
+Fourteen because that is the lookback the published noise-area definition uses:
+the average absolute move from the open, at the same time of day, over the
+previous 14 days (Zarattini, Aziz and Barbon, SSRN 4824172, section 3). A
+separate constant from `RANGE_MEMORY` despite the shared value — one is a
+practitioner gap threshold and the other a published band, so a change to
+either must not silently move the other."""
+
+_NANOS_PER_MINUTE: Final = 60_000_000_000
+"""Bucket width for the move profile. Minutes elapsed rather than bars seen,
+so a bar missing from the corpus cannot shift every later observation into the
+wrong bucket and compare 11:00 against 10:59."""
+
 OPENING_WINDOWS: Final = (5, 15, 30, 60)
 """Opening-range windows tracked live, in minutes — the four §5.2 names.
 
@@ -320,6 +335,14 @@ class SessionLevels:
     """Completed opening ranges by window, for the windows in `OPENING_WINDOWS`.
     A window appears only once it has filled — see `opening_range`."""
 
+    mean_abs_move_from_open: float | None = None
+    """How far this instrument has typically travelled from the open by this
+    point of the session: the mean of `abs(close / session_open - 1)` at the
+    same minute of the session over the last `MOVE_MEMORY` completed ones. A
+    fraction, so it compares across instruments, and `None` until the history
+    is full. It is the width a move has to beat before it is more than the
+    day's noise — see `strategies/intraday_momentum.py`."""
+
     @property
     def gap(self) -> float | None:
         """Overnight gap as a fraction of the prior close, or `None` without one.
@@ -422,10 +445,12 @@ class SessionLevelTracker:
 
     __slots__ = (
         "_levels",
+        "_moves",
         "_opening_bars",
         "_prior_close",
         "_ranges",
         "_session",
+        "_session_moves",
         "_value",
         "_volume",
     )
@@ -435,6 +460,8 @@ class SessionLevelTracker:
         self._session: dict[Symbol, Nanos] = {}
         self._prior_close: dict[Symbol, Price] = {}
         self._ranges: dict[Symbol, list[Decimal]] = {}
+        self._moves: dict[Symbol, list[dict[int, float]]] = {}
+        self._session_moves: dict[Symbol, dict[int, float]] = {}
         self._value: dict[Symbol, Decimal] = {}
         self._volume: dict[Symbol, Decimal] = {}
         self._opening_bars: dict[Symbol, list[Bar]] = {}
@@ -470,6 +497,11 @@ class SessionLevelTracker:
             opening.append(bar)
         previous = self._levels.get(symbol)
         count = previous.bar_count + 1 if previous is not None else 1
+        session_open = previous.session_open if previous is not None else bar.open
+        minute = int((bar.ts_event - session.open_ns) // _NANOS_PER_MINUTE)
+        self._session_moves[symbol][minute] = abs(
+            float((bar.close.value - session_open.value) / session_open.value)
+        )
         ranges = dict(previous.opening_ranges) if previous is not None else {}
         # A window is computed once, on the bar that completes it, and never
         # again: the range is a property of the first `minutes` bars, so
@@ -483,7 +515,7 @@ class SessionLevelTracker:
             session_date=session.session_date,
             open_ns=session.open_ns,
             close_ns=session.close_ns,
-            session_open=previous.session_open if previous is not None else bar.open,
+            session_open=session_open,
             high=max(previous.high, bar.high) if previous is not None else bar.high,
             low=min(previous.low, bar.low) if previous is not None else bar.low,
             close=bar.close,
@@ -492,6 +524,7 @@ class SessionLevelTracker:
             prior_close=self._prior_close.get(symbol),
             prior_range_mean=self._range_mean(symbol),
             opening_ranges=ranges,
+            mean_abs_move_from_open=self._mean_move(symbol, minute),
         )
 
     def levels(self, symbol: Symbol) -> SessionLevels | None:
@@ -523,6 +556,14 @@ class SessionLevelTracker:
             history = self._ranges.setdefault(symbol, [])
             history.append(finished.range_width)
             del history[:-RANGE_MEMORY]
+        # Only a session that produced observations contributes a profile, for
+        # the reason the range history gives above.
+        moves = self._session_moves.get(symbol)
+        if moves:
+            profiles = self._moves.setdefault(symbol, [])
+            profiles.append(moves)
+            del profiles[:-MOVE_MEMORY]
+        self._session_moves[symbol] = {}
         self._session[symbol] = session.open_ns
         self._value[symbol] = Decimal(0)
         self._volume[symbol] = Decimal(0)
@@ -539,6 +580,23 @@ class SessionLevelTracker:
         if len(history) < RANGE_MEMORY:
             return None
         return tidy_decimal(sum(history, Decimal(0)) / len(history), CORPUS_PLACES)
+
+    def _mean_move(self, symbol: Symbol, minute: int) -> float | None:
+        """Mean absolute move from the open at this minute, or `None` when cold.
+
+        `None` until `MOVE_MEMORY` sessions have completed, for the reason
+        `_range_mean` gives. Sessions that never reached this minute — a half
+        day, or one the corpus holds only part of — are left out rather than
+        counted as zero: they carry no observation here, and a zero would pull
+        the band in on exactly the afternoons it is supposed to measure.
+        """
+        history = self._moves.get(symbol, ())
+        if len(history) < MOVE_MEMORY:
+            return None
+        samples = [profile[minute] for profile in history if minute in profile]
+        if not samples:
+            return None
+        return sum(samples) / len(samples)
 
     def __repr__(self) -> str:
         return f"SessionLevelTracker({len(self._levels)} symbols)"

@@ -15,6 +15,7 @@ from neurotrade.core.calendar import TradingSession
 from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.types import Price, Quantity, Symbol, Venue
 from neurotrade.features.levels import (
+    MOVE_MEMORY,
     OpeningRange,
     SessionLevelTracker,
     opening_range,
@@ -320,3 +321,84 @@ def test_symbols_do_not_share_levels() -> None:
     aapl, msft = tracker.levels(AAPL), tracker.levels(MSFT)
     assert aapl is not None and msft is not None
     assert (str(aapl.close), str(msft.close)) == ("100", "200")
+
+
+# ── The move profile ─────────────────────────────────────────────────────────
+
+
+def prior_sessions(tracker: SessionLevelTracker, profiles: list[list[str]]) -> int:
+    """Fold one completed session per profile, each opening at 100.
+
+    A profile lists the closes after the opening bar, so `["101"]` is a session
+    that opened at 100 and was 1% above the open one minute later. Returns the
+    first minute of the next session, which is the one a test then measures.
+    """
+    first = 1
+    for day, closes in enumerate(profiles, start=1):
+        bars = [bar(first, "100")]
+        bars += [bar(first + index, close) for index, close in enumerate(closes, start=1)]
+        fold(tracker, bars, session(day, first_minute=first))
+        first += 400
+    return first
+
+
+def live_move(
+    tracker: SessionLevelTracker, first: int, day: int, minutes: list[int]
+) -> float | None:
+    """Fold a session whose bars land on `minutes` after the open, and report it."""
+    current = session(day, first_minute=first)
+    fold(tracker, [bar(first + minute - 1, "100") for minute in minutes], current)
+    levels = tracker.levels(AAPL)
+    assert levels is not None
+    return levels.mean_abs_move_from_open
+
+
+def test_a_partial_history_reports_no_typical_move() -> None:
+    """Thirteen sessions is a different statistic wearing the same name."""
+    tracker = SessionLevelTracker()
+    first = prior_sessions(tracker, [["101"]] * (MOVE_MEMORY - 1))
+    assert live_move(tracker, first, MOVE_MEMORY, [1, 2]) is None
+
+
+def test_the_typical_move_is_the_mean_over_a_full_history() -> None:
+    tracker = SessionLevelTracker()
+    first = prior_sessions(tracker, [["101"]] * MOVE_MEMORY)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [1, 2]) == pytest.approx(0.01)
+
+
+def test_the_typical_move_is_absolute_so_direction_does_not_cancel() -> None:
+    """Seven sessions up 1% and seven down 1% is a typical move of 1%, not zero."""
+    tracker = SessionLevelTracker()
+    half = MOVE_MEMORY // 2
+    first = prior_sessions(tracker, [["101"]] * half + [["99"]] * half)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [1, 2]) == pytest.approx(0.01)
+
+
+def test_the_profile_is_per_minute_of_the_session() -> None:
+    """The move required to stand out at minute 2 is not the one at minute 3."""
+    tracker = SessionLevelTracker()
+    first = prior_sessions(tracker, [["101", "102"]] * MOVE_MEMORY)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [1, 2]) == pytest.approx(0.01)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [3]) == pytest.approx(0.02)
+
+
+def test_a_missing_bar_does_not_shift_the_profile_by_one() -> None:
+    """Buckets are elapsed minutes, not bars seen.
+
+    A session the corpus is missing minute 2 of still compares its minute 3 with
+    the previous sessions' minute 3. Keyed on the bar count instead, every later
+    observation in that session would be read against the wrong bucket.
+    """
+    tracker = SessionLevelTracker()
+    first = prior_sessions(tracker, [["101", "102"]] * MOVE_MEMORY)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [1, 3]) == pytest.approx(0.02)
+
+
+def test_a_session_that_ended_early_contributes_nothing_after_its_bell() -> None:
+    """Not a zero: it holds no observation there, and a zero would pull the
+    typical move in on exactly the afternoons being measured."""
+    tracker = SessionLevelTracker()
+    profiles = [["101", "102"]] * (MOVE_MEMORY - 1) + [["101"]]
+    first = prior_sessions(tracker, profiles)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [1, 2]) == pytest.approx(0.01)
+    assert live_move(tracker, first, MOVE_MEMORY + 1, [3]) == pytest.approx(0.02)
