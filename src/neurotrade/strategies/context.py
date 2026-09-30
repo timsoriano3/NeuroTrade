@@ -40,6 +40,15 @@ The tracker is fed from `observe`, which only ever sees bars that have already
 closed — so unlike the plain functions in `features/levels.py`, this path cannot
 be handed a bar from after the decision moment.
 
+**The cross-section is assembled only if something asked for it.** §5.4's
+relative strength and §5.5's residual reversion need to see the rest of the
+universe; nothing else does, and building a snapshot per tick for a run of
+single-instrument strategies would be work nobody reads. `declare` turns the
+tracker on when a strategy sets `needs_cross_section`, which is also what keeps
+every measurement taken before this existed byte-identical. What a strategy then
+receives is the **previous** tick — see `features/cross_section.py` for why a
+same-tick view is lookahead rather than freshness.
+
 **Feature values are resolved per strategy, from what it declared.** The union
 of every declared feature is computed once per bar, then projected down to each
 strategy's own declarations — so the work is shared but the visibility is not.
@@ -50,7 +59,7 @@ different versions of one feature each get their own (§10.2).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import date, timedelta
 from typing import Final
 
@@ -59,6 +68,11 @@ from neurotrade.core.clock import Nanos, to_datetime
 from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.ports import CalendarPort
 from neurotrade.core.types import Symbol, Venue
+from neurotrade.features.cross_section import (
+    DEFAULT_TRAILING_MINUTES,
+    CrossSection,
+    CrossSectionTracker,
+)
 from neurotrade.features.levels import SessionLevelTracker
 from neurotrade.features.registry import FeatureRegistry, FeatureSpec
 from neurotrade.features.resolver import FeatureResolver
@@ -167,7 +181,9 @@ class MarketContext:
     """
 
     __slots__ = (
+        "_benchmarks",
         "_calendar",
+        "_cross_section",
         "_features",
         "_interval",
         "_key",
@@ -178,7 +194,9 @@ class MarketContext:
         "_specs",
         "_started",
         "_tracker",
+        "_trailing_minutes",
         "_values",
+        "_wants_cross_section",
     )
 
     def __init__(
@@ -188,6 +206,8 @@ class MarketContext:
         calendar: CalendarPort,
         interval: BarInterval = BarInterval.MIN_1,
         regime_source: RegimeSource = time_of_day_regime,
+        benchmarks: Mapping[Symbol, Symbol] | None = None,
+        trailing_minutes: int = DEFAULT_TRAILING_MINUTES,
     ) -> None:
         """Wire the context to a feature library and a calendar.
 
@@ -198,6 +218,13 @@ class MarketContext:
                 match it.
             regime_source: Classifier. Defaults to the time-of-day rule; Phase
                 5 passes the HMM here instead.
+            benchmarks: Instrument to the symbol its beta is measured against —
+                built from `core.sectors.SectorMap` by the caller, because the
+                map is point-in-time and this layer holds no dates. An
+                instrument absent from it gets no beta, and therefore no
+                residual. Only read when a strategy declares
+                `needs_cross_section`.
+            trailing_minutes: Window for the cross-section's trailing return.
         """
         self._features = features
         self._calendar = calendar
@@ -211,6 +238,10 @@ class MarketContext:
         self._values: dict[str, float | None] = {}
         self._session_now: TradingSession | None = None
         self._started = False
+        self._benchmarks = dict(benchmarks or {})
+        self._trailing_minutes = trailing_minutes
+        self._wants_cross_section = False
+        self._cross_section: CrossSectionTracker | None = None
 
     def declare(self, strategy: Strategy) -> None:
         """Register a strategy's feature dependencies before the run starts.
@@ -244,6 +275,11 @@ class MarketContext:
         for ref in strategy.features:
             self._specs[str(ref)] = self._features.get(ref.name, ref.version)
         self._resolver = FeatureResolver(self._specs, interval=self._interval)
+        if strategy.needs_cross_section and self._cross_section is None:
+            self._wants_cross_section = True
+            self._cross_section = CrossSectionTracker(
+                benchmarks=self._benchmarks, trailing_minutes=self._trailing_minutes
+            )
 
     @property
     def lookback(self) -> int:
@@ -277,6 +313,14 @@ class MarketContext:
         self._values = self._resolver.resolve(bar)
         self._session_now = self._session_for(bar)
         self._tracker.update(bar, self._session_now)
+        if self._cross_section is not None:
+            # After the level tracker, and from its output: the session anchors
+            # have one implementation, and the cross-section adds only what is
+            # undefined for a single instrument. A bar no session holds produces
+            # no levels, so there is nothing to fold.
+            levels = self._tracker.levels(bar.symbol)
+            if levels is not None:
+                self._cross_section.observe(levels, bar.symbol, bar.ts_event)
         self._key = key
 
     def __call__(self, bar: Bar, strategy: Strategy) -> StrategyContext:
@@ -316,7 +360,19 @@ class MarketContext:
             regime=self._regime_source(session, bar.ts_event),
             values=values,
             levels=self._tracker.levels(bar.symbol),
+            cross_section=self._section_for(strategy),
         )
+
+    def _section_for(self, strategy: Strategy) -> CrossSection | None:
+        """The last closed tick, for a strategy that declared it wants one.
+
+        `None` for everything else, so a strategy reading it without declaring
+        finds nothing and trades nothing rather than silently working on some
+        runs and not others depending on who else was registered.
+        """
+        if not strategy.needs_cross_section or self._cross_section is None:
+            return None
+        return self._cross_section.snapshot()
 
     def _session_for(self, bar: Bar) -> TradingSession | None:
         """The trading session holding a bar, or `None` if none does.
@@ -341,4 +397,5 @@ class MarketContext:
         return self._sessions[key]
 
     def __repr__(self) -> str:
-        return f"MarketContext({len(self._specs)} features, lookback={self.lookback})"
+        section = ", cross-section" if self._wants_cross_section else ""
+        return f"MarketContext({len(self._specs)} features, lookback={self.lookback}{section})"

@@ -15,7 +15,8 @@ is not the software trading your money.
 | `registry.py` | Registering a feature, and the rules every feature obeys |
 | `indicators.py` | The registered features: log return, ATR, realised volatility, relative volume, EMA, fractionally differenced close |
 | `resolver.py` | The rolling per-symbol window a feature is computed from |
-| `levels.py` | Session-anchored reference levels — opening range, session VWAP, prior close, the gap, and the mean move from the open by this minute of the session, and the dispersion of price around VWAP. Plain functions plus the tracker that keeps them current |
+| `cross_section.py` | What the rest of the universe was doing one tick ago: session and trailing returns on a shared clock, relative volume, daily beta, and the residual |
+| `levels.py` | Session-anchored reference levels — opening range, session VWAP, prior close, the gap, and the mean move from the open by this minute of the session, the dispersion of price around VWAP, and the session's volume against its own profile by this minute. Plain functions plus the tracker that keeps them current |
 
 **Why `levels.py` sits outside the registry.** A registered feature declares a
 fixed lookback and is handed exactly that many bars. A level anchored to the

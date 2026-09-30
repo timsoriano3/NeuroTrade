@@ -1,0 +1,128 @@
+# Point-in-time sector membership — the regressors §5.4 and §5.5 need.
+#
+# A sector here is a TRADABLE PROXY, not a label: each is one of the eleven
+# `XL*` SPDRs already in `config/universe.yaml`, so the residual a strategy
+# computes is one somebody could actually hedge. `00-phase-2.plan.md` decision 3
+# chose this over per-name GICS membership, which is licensed and whose
+# point-in-time history would have to be reconstructed from present-day
+# membership.
+#
+# This is DATA, not configuration, for the same reason `universe.yaml` is: it
+# grows as names and reclassifications are added, and folding it into the config
+# hash would churn the fingerprint stamped on every trade. A run records
+# `SectorMap.digest`.
+#
+# ── The bias in this file, stated plainly ───────────────────────────────────
+#
+# An assignment with no `from` is recorded from `UNKNOWN_SINCE` (1900-01-01),
+# which means "at least as far back as any session we hold". That is TODAY's
+# classification applied BACKWARDS. For any reclassification nobody recorded it
+# is wrong in the direction that flatters a backtest: the name is residualised
+# against the sector it ended up in, which is the sector it correlated with most
+# by the end of the sample. `SectorMap.unknown_starts` counts them so the size of
+# the bias can be quoted. The mitigation is that this universe is 58 mega-caps
+# over four years; the shape means recording a real date later is a data change,
+# not a schema change.
+#
+# ── The one reclassification recorded, and why it matters here ──────────────
+#
+# GICS's 2023 structure change moved the payment networks (V, MA and the rest of
+# "data processing & outsourced services") out of Information Technology and
+# into Financials, effective before the open on 2023-03-17. That date falls
+# INSIDE the seed window (2022-09-30 .. 2023-09-29), so a map without it would
+# residualise V and MA against XLF for five months in which they traded as
+# technology. It is the case that justifies the dated shape.
+#
+# NOT CONFIRMED IN-SESSION against S&P's own announcement — the date is from the
+# GICS 2023 structure change as commonly reported. Confirm before quoting it in
+# a result; the machinery does not depend on the date being exactly right, only
+# on there being one.
+#
+# ── What has no sector ──────────────────────────────────────────────────────
+#
+# SPY, QQQ, DIA, IWM, EEM, VXX, XIU and the eleven SPDRs themselves are absent.
+# They are regressors or instruments in their own right, never members: a sector
+# ETF regressed on itself has a residual of exactly zero and would enter a
+# cross-sectional ranking as the most average name in the universe. `SectorMap`
+# refuses a self-assignment outright.
+#
+# QUOTE ANY TICKER YAML WOULD READ AS SOMETHING ELSE — `ON` is ON Semiconductor,
+# and unquoted it parses as the boolean true. The loader rejects a non-string
+# rather than coercing it.
+
+version: 1
+
+# The market leg each venue's names regress on. Per venue, not per instrument:
+# SPY does not price TSX listings, so the Canadian names use XIU. A venue absent
+# here has no market regressor and its names are skipped rather than
+# residualised against another country's index.
+markets:
+  NASDAQ: SPY.ARCA
+  NYSE: SPY.ARCA
+  TSX: XIU.TSX
+
+# `from` and `until` are optional and half-open: `from` is the first session the
+# membership holds, `until` the first session it does not. Omitting `from` means
+# UNKNOWN_SINCE — see the bias note above.
+assignments:
+  # ── Technology ────────────────────────────────────────────────────────────
+  - { symbol: AAPL.NASDAQ, sector: XLK.ARCA }
+  - { symbol: AMD.NASDAQ, sector: XLK.ARCA }
+  - { symbol: INTC.NASDAQ, sector: XLK.ARCA }
+  - { symbol: MSFT.NASDAQ, sector: XLK.ARCA }
+  - { symbol: NVDA.NASDAQ, sector: XLK.ARCA }
+  - { symbol: "ON.NASDAQ", sector: XLK.ARCA } # ON Semiconductor, quoted
+  - { symbol: SHOP.TSX, sector: XLK.ARCA }
+
+  # The payment networks, before and after the GICS 2023 structure change.
+  - { symbol: MA.NYSE, sector: XLK.ARCA, until: 2023-03-17 }
+  - { symbol: MA.NYSE, sector: XLF.ARCA, from: 2023-03-17 }
+  - { symbol: V.NYSE, sector: XLK.ARCA, until: 2023-03-17 }
+  - { symbol: V.NYSE, sector: XLF.ARCA, from: 2023-03-17 }
+
+  # ── Communication services ────────────────────────────────────────────────
+  - { symbol: GOOGL.NASDAQ, sector: XLC.ARCA }
+  - { symbol: META.NASDAQ, sector: XLC.ARCA }
+  - { symbol: NFLX.NASDAQ, sector: XLC.ARCA }
+  - { symbol: DIS.NYSE, sector: XLC.ARCA }
+  - { symbol: BCE.TSX, sector: XLC.ARCA }
+  - { symbol: T.TSX, sector: XLC.ARCA } # Telus; NYSE's T is AT&T, a different company
+
+  # ── Consumer discretionary ────────────────────────────────────────────────
+  - { symbol: AMZN.NASDAQ, sector: XLY.ARCA }
+  - { symbol: TSLA.NASDAQ, sector: XLY.ARCA }
+  - { symbol: F.NYSE, sector: XLY.ARCA }
+
+  # ── Consumer staples ──────────────────────────────────────────────────────
+  - { symbol: KO.NYSE, sector: XLP.ARCA }
+  - { symbol: WMT.NYSE, sector: XLP.ARCA }
+
+  # ── Financials ────────────────────────────────────────────────────────────
+  - { symbol: BAC.NYSE, sector: XLF.ARCA }
+  - { symbol: JPM.NYSE, sector: XLF.ARCA }
+  - { symbol: TD.NYSE, sector: XLF.ARCA } # the USD listing
+  - { symbol: BMO.TSX, sector: XLF.ARCA }
+  - { symbol: BNS.TSX, sector: XLF.ARCA }
+  - { symbol: CM.TSX, sector: XLF.ARCA }
+  - { symbol: RY.TSX, sector: XLF.ARCA }
+  - { symbol: TD.TSX, sector: XLF.ARCA } # the CAD listing; a distinct instrument
+
+  # ── Energy ────────────────────────────────────────────────────────────────
+  - { symbol: CVX.NYSE, sector: XLE.ARCA }
+  - { symbol: XOM.NYSE, sector: XLE.ARCA }
+  - { symbol: CNQ.TSX, sector: XLE.ARCA }
+  - { symbol: ENB.TSX, sector: XLE.ARCA }
+  - { symbol: SU.TSX, sector: XLE.ARCA }
+
+  # ── Health care ───────────────────────────────────────────────────────────
+  - { symbol: JNJ.NYSE, sector: XLV.ARCA }
+  - { symbol: PFE.NYSE, sector: XLV.ARCA }
+  - { symbol: UNH.NYSE, sector: XLV.ARCA }
+
+  # ── Industrials ───────────────────────────────────────────────────────────
+  - { symbol: BA.NYSE, sector: XLI.ARCA }
+  - { symbol: CNR.TSX, sector: XLI.ARCA }
+  - { symbol: CP.TSX, sector: XLI.ARCA }
+
+  # ── Materials ─────────────────────────────────────────────────────────────
+  - { symbol: ABX.TSX, sector: XLB.ARCA }

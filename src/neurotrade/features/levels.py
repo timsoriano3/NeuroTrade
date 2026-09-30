@@ -41,6 +41,7 @@ from neurotrade.core.types import CORPUS_PLACES, Price, Symbol, tidy_decimal
 
 __all__ = [
     "OPENING_WINDOWS",
+    "VOLUME_MEMORY",
     "OpeningRange",
     "SessionLevelTracker",
     "SessionLevels",
@@ -69,6 +70,15 @@ previous 14 days (Zarattini, Aziz and Barbon, SSRN 4824172, section 3). A
 separate constant from `RANGE_MEMORY` despite the shared value — one is a
 practitioner gap threshold and the other a published band, so a change to
 either must not silently move the other."""
+
+VOLUME_MEMORY: Final = 14
+"""Completed sessions averaged into `relative_volume_from_open`.
+
+Fourteen to match `MOVE_MEMORY` and `RANGE_MEMORY`: the three profiles are read
+side by side, and a relative volume over ten sessions beside a noise area over
+fourteen would be two different notions of "recently" in one decision. A
+separate constant despite the shared value, so changing one cannot silently move
+the others."""
 
 _NANOS_PER_MINUTE: Final = 60_000_000_000
 """Bucket width for the move profile. Minutes elapsed rather than bars seen,
@@ -403,6 +413,19 @@ class SessionLevels:
     """Volume-weighted dispersion of price around `vwap`, as a fraction of it —
     the unit §5.3's VWAP bands are quoted in. `None` before anything traded."""
 
+    session_volume: Decimal = Decimal(0)
+    """Shares traded since the open. `Decimal` because it is a quantity the
+    corpus holds exactly, not a derived statistic — `relative_volume_from_open`
+    is the float that comes out of it."""
+
+    relative_volume_from_open: float | None = None
+    """How heavy this session is against its own recent history, by this point
+    of the day: `session_volume` over the mean cumulative volume at the same
+    minute of the last `VOLUME_MEMORY` completed sessions. The measure a
+    stocks-in-play ranking is built on, and time-of-day dependent for the same
+    reason `mean_abs_move_from_open` is — half a day's volume by 10:00 is
+    extraordinary and by 15:30 is ordinary. `None` until the history is full."""
+
     mean_abs_move_from_open: float | None = None
     """How far this instrument has typically travelled from the open by this
     point of the session: the mean of `abs(close / session_open - 1)` at the
@@ -519,9 +542,11 @@ class SessionLevelTracker:
         "_ranges",
         "_session",
         "_session_moves",
+        "_session_volumes",
         "_square",
         "_value",
         "_volume",
+        "_volumes",
     )
 
     def __init__(self) -> None:
@@ -534,6 +559,12 @@ class SessionLevelTracker:
         self._square: dict[Symbol, Decimal] = {}
         self._value: dict[Symbol, Decimal] = {}
         self._volume: dict[Symbol, Decimal] = {}
+        # Cumulative volume by minute of session, this session and the last
+        # `VOLUME_MEMORY` completed ones. Shaped exactly like `_session_moves`
+        # and `_moves`, because it answers the same question about a different
+        # quantity and two shapes would be two sets of edge cases.
+        self._session_volumes: dict[Symbol, dict[int, Decimal]] = {}
+        self._volumes: dict[Symbol, list[dict[int, Decimal]]] = {}
         self._opening_bars: dict[Symbol, list[Bar]] = {}
 
     def update(self, bar: Bar, session: TradingSession | None) -> None:
@@ -573,6 +604,7 @@ class SessionLevelTracker:
         self._session_moves[symbol][minute] = abs(
             float((bar.close.value - session_open.value) / session_open.value)
         )
+        self._session_volumes[symbol][minute] = self._volume[symbol]
         ranges = dict(previous.opening_ranges) if previous is not None else {}
         # A window is computed once, on the bar that completes it, and never
         # again: the range is a property of the first `minutes` bars, so
@@ -598,6 +630,8 @@ class SessionLevelTracker:
             prior_close=self._prior_close.get(symbol),
             prior_range_mean=self._range_mean(symbol),
             opening_ranges=ranges,
+            session_volume=self._volume[symbol],
+            relative_volume_from_open=self._relative_volume(symbol, minute),
             mean_abs_move_from_open=self._mean_move(symbol, minute),
         )
 
@@ -637,7 +671,16 @@ class SessionLevelTracker:
             profiles = self._moves.setdefault(symbol, [])
             profiles.append(moves)
             del profiles[:-MOVE_MEMORY]
+        volumes = self._session_volumes.get(symbol)
+        if volumes:
+            # Named apart from `profiles` above: both are lists of per-minute
+            # profiles but one holds floats and the other Decimals, and reusing
+            # the name makes the two indistinguishable to a reader and to mypy.
+            volume_profiles = self._volumes.setdefault(symbol, [])
+            volume_profiles.append(volumes)
+            del volume_profiles[:-VOLUME_MEMORY]
         self._session_moves[symbol] = {}
+        self._session_volumes[symbol] = {}
         self._session[symbol] = session.open_ns
         self._value[symbol] = Decimal(0)
         self._volume[symbol] = Decimal(0)
@@ -672,6 +715,29 @@ class SessionLevelTracker:
         if not samples:
             return None
         return sum(samples) / len(samples)
+
+    def _relative_volume(self, symbol: Symbol, minute: int) -> float | None:
+        """Session volume so far over its mean at this minute, or `None` when cold.
+
+        `None` until `VOLUME_MEMORY` sessions have completed, and `None` again
+        when no completed session reached this minute — a run of half days, or a
+        corpus that holds only part of them. Both for the reason `_mean_move`
+        gives: a zero there would read as "no volume normally trades by now",
+        which makes every afternoon look like a stock in play.
+
+        A mean rather than a median, matching every other profile in this
+        module. Volume is right-skewed, so the mean sits above the typical
+        session and this measure is therefore *conservative* — a name has to be
+        heavier than an average that a few heavy days already lifted.
+        """
+        history = self._volumes.get(symbol, ())
+        if len(history) < VOLUME_MEMORY:
+            return None
+        samples = [profile[minute] for profile in history if minute in profile]
+        typical = sum(samples, Decimal(0))
+        if not samples or typical <= 0:
+            return None
+        return float(self._volume[symbol] * len(samples) / typical)
 
     def __repr__(self) -> str:
         return f"SessionLevelTracker({len(self._levels)} symbols)"

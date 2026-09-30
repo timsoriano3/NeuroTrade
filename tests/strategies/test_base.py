@@ -17,6 +17,7 @@ from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.intent import EntryTrigger, Intent
 from neurotrade.core.registry import DuplicateRegistration, RegistryFrozen
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
+from neurotrade.features.cross_section import CrossSection, InstrumentSnapshot
 from neurotrade.strategies.base import (
     FeatureRef,
     Regime,
@@ -78,8 +79,43 @@ def test_context_exposes_no_history_clock_or_broker() -> None:
     lets a strategy bypass the risk engine entirely.
     """
     exposed = {f.name for f in fields(StrategyContext)}
-    assert exposed == {"symbol", "as_of", "session", "regime", "values", "levels"}
+    assert exposed == {
+        "symbol",
+        "as_of",
+        "session",
+        "regime",
+        "values",
+        "levels",
+        "cross_section",
+    }
     assert not exposed & {"history", "bars", "clock", "broker", "portfolio"}
+
+
+def test_the_cross_section_is_a_snapshot_and_not_a_way_back_to_bars() -> None:
+    """The one field added since, and the check that it did not widen the window.
+
+    A cross-section is other instruments' *derived statistics* at a past tick.
+    If it ever carried bars, prices or a tracker it would be the history this
+    context refuses, reached through a different name.
+    """
+    exposed = {f.name for f in fields(CrossSection)}
+    assert exposed == {"as_of", "rows"}
+    row = {f.name for f in fields(InstrumentSnapshot)}
+    assert row == {
+        "symbol",
+        "session_return",
+        "trailing_return",
+        "relative_volume",
+        "beta",
+        "residual",
+    }
+    assert all(f.type in {"float", "float | None", "Symbol"} for f in fields(InstrumentSnapshot))
+
+
+def test_a_strategy_gets_no_cross_section_unless_it_declares_one() -> None:
+    """Undeclared means `None`, so reading it without asking trades nothing."""
+    assert Breakout.needs_cross_section is False
+    assert context().cross_section is None
 
 
 def test_undeclared_features_are_refused() -> None:

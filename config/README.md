@@ -23,6 +23,21 @@ added. A run records `Universe.digest` instead.
 Quote any ticker YAML would read as something else: `ON`, `NO` and `OFF` parse
 as booleans, and `ON` is a real NASDAQ listing.
 
+`sectors.yaml` says which sector proxy each of those instruments belonged to,
+**on a given date**, and which index its venue regresses on. Read by
+`adapters/universe/sector_file.py` into `core.sectors.SectorMap`, and outside
+the config hash for the same reason. It is what §5.4's relative strength and
+§5.5's residual reversion residualise against; without it a residual still
+carries sector beta, so a day energy runs reads as alpha on every energy name at
+once.
+
+Two things about it are worth knowing before quoting a result built on it. It is
+**dated on purpose** — GICS moved the payment networks out of technology part
+way through the seed window, and V and MA carry two rows each because of it. And
+every assignment with no `from` is present-day classification applied backwards,
+which is a real bias in the flattering direction; `SectorMap.unknown_starts`
+counts them. The file's own header says both at length.
+
 ## Settings live in files; machine details live in the environment
 
 Anything specific to one computer — where the data directory is, credentials —

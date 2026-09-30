@@ -13,6 +13,7 @@ goodwill.
 |---|---|
 | `types.py` | Prices, quantities, money, instruments. Exact arithmetic — never floats |
 | `universe.py` | Which instruments are in scope, as an ordered set with a stable digest |
+| `sectors.py` | Which sector proxy an instrument belonged to on a given day, and the market leg its venue regresses on |
 | `clock.py` | The single source of time. Real in production, simulated in replay |
 | `events.py` | What the market did: bars, quotes, trade prints, session changes, halts |
 | `calendar.py` | The shape of a trading day — when a session opened, closed, and how many bars it should hold |

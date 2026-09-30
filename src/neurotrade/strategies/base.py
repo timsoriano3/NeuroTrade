@@ -46,6 +46,7 @@ from neurotrade.core.events import Bar, MarketSession, Quote, TickTrade
 from neurotrade.core.intent import Intent
 from neurotrade.core.registry import Registry
 from neurotrade.core.types import Symbol
+from neurotrade.features.cross_section import CrossSection
 from neurotrade.features.levels import SessionLevels
 
 __all__ = [
@@ -145,6 +146,16 @@ class StrategyContext:
     opening ranges, prior close. `None` before the session's first bar, and
     outside a session — never a partially filled stand-in."""
 
+    cross_section: CrossSection | None = None
+    """The rest of the universe, **as of the previous tick** (§5.4, §5.5).
+    `None` unless the strategy set `needs_cross_section`, and `None` before the
+    first tick has closed.
+
+    One tick stale by construction, not by accident: instruments arrive inside
+    a tick in symbol order, so a same-tick view would show the first strategy
+    dispatched the other names' bars before they were published. See
+    `features/cross_section.py`."""
+
     def feature(self, name: str) -> float | None:
         """Read a declared feature.
 
@@ -225,6 +236,16 @@ class Strategy(ABC):
     """Multiple of modelled cost this strategy's edge must clear to be worth
     trading (§5.9). A scalper needs a higher bar than a multi-hour hold, because
     it pays the spread far more often for the same gross move."""
+
+    needs_cross_section: ClassVar[bool] = False
+    """Whether this strategy reads the rest of the universe.
+
+    Declared for the reason `features` is declared, and with one extra
+    consequence. The host assembles a cross-section only when something asks
+    for one, so a run of single-instrument strategies does the same work it did
+    before this field existed — and produces the same digest. A strategy that
+    reads `context.cross_section` without declaring this finds `None` there and
+    trades nothing, which is the safe direction to fail."""
 
     @classmethod
     def sweep(cls) -> tuple[tuple[str, Self], ...]:

@@ -334,3 +334,95 @@ def test_levels_reset_at_the_next_session_and_carry_the_prior_close() -> None:
         "100",
         1,
     )
+
+
+# ── The cross-section ────────────────────────────────────────
+
+
+class Watcher(Strategy):
+    """A strategy that reads the universe. Records what it was shown."""
+
+    name, version = "watcher", "1.0.0"
+    needs_cross_section: ClassVar[bool] = True
+
+
+class Loner(Strategy):
+    """A strategy that does not. Must never be handed one."""
+
+    name, version = "loner", "1.0.0"
+
+
+MSFT = Symbol("MSFT", Venue.NASDAQ)
+
+
+def priced(symbol: Symbol, ts: Nanos, close: str) -> Bar:
+    price = Price(close)
+    return Bar(
+        symbol=symbol,
+        ts_event=ts,
+        ts_init=ts,
+        interval=BarInterval.MIN_1,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=Quantity(1_000),
+    )
+
+
+def test_no_cross_section_is_built_when_nothing_asks_for_one() -> None:
+    """What keeps every measurement taken before this existed byte-identical."""
+    context = context_over(FULL_DAY)
+    context.declare(Loner())
+    bar = priced(AAPL, utc(14, 0), "100")
+    context.observe(bar)
+    assert context(bar, Loner()).cross_section is None
+
+
+def test_a_declaring_strategy_gets_one_and_a_non_declaring_one_does_not() -> None:
+    """Both registered on the same context, so the gate is per strategy, not per run."""
+    context = context_over(FULL_DAY)
+    context.declare(Watcher())
+    context.declare(Loner())
+    first = priced(AAPL, utc(14, 0), "100")
+    context.observe(first)
+    second = priced(AAPL, utc(14, 1), "101")
+    context.observe(second)
+    assert context(second, Watcher()).cross_section is not None
+    assert context(second, Loner()).cross_section is None
+
+
+def test_the_cross_section_a_strategy_sees_is_always_an_earlier_tick() -> None:
+    """The no-lookahead guarantee, through the real context rather than the tracker.
+
+    Two instruments print at 14:01. Whichever is dispatched first must not be
+    shown the other's 14:01 bar, so the section it gets is stamped 14:00.
+    """
+    context = context_over(FULL_DAY)
+    context.declare(Watcher())
+    for symbol in (AAPL, MSFT):
+        context.observe(priced(symbol, utc(14, 0), "100"))
+    later = priced(AAPL, utc(14, 1), "101")
+    context.observe(later)
+    section = context(later, Watcher()).cross_section
+    assert section is not None
+    assert section.as_of == utc(14, 0)
+    assert set(section.symbols) == {AAPL, MSFT}
+
+
+def test_a_bar_outside_any_session_folds_into_no_cross_section() -> None:
+    """No session means no levels, and the tracker is fed from the levels."""
+    context = context_over(FULL_DAY)
+    context.declare(Watcher())
+    stray = priced(AAPL, utc(11, 0), "100")
+    context.observe(stray)
+    assert context(stray, Watcher()).cross_section is None
+
+
+def test_the_repr_says_whether_a_cross_section_is_being_built() -> None:
+    plain = context_over(FULL_DAY)
+    plain.declare(Loner())
+    watching = context_over(FULL_DAY)
+    watching.declare(Watcher())
+    assert "cross-section" not in repr(plain)
+    assert "cross-section" in repr(watching)
