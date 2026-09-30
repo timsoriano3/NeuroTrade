@@ -20,6 +20,8 @@ from neurotrade.lab.significance import (
     deflated_sharpe_ratio,
     effective_n_trials,
     expected_max_sharpe,
+    haircut_sharpe,
+    minimum_backtest_length,
     moments,
     probabilistic_sharpe_ratio,
     probability_of_backtest_overfitting,
@@ -382,3 +384,123 @@ def test_clustering_raises_a_verdict_that_was_already_failing() -> None:
     clustered = deflated_sharpe_ratio(poor, trial_sharpes=trials, n_observations=600)
     assert full < clustered < 0.5
     assert abs(clustered - 0.5) < abs(full - 0.5)
+
+
+# ── MinBTL ──────────────────────────────────────────────────────────────────
+
+
+def test_min_backtest_length_grows_with_the_search() -> None:
+    """More looks need more sample before the best of them means anything."""
+    two = minimum_backtest_length(n_trials=2, target_sharpe=1.0)
+    eight = minimum_backtest_length(n_trials=8, target_sharpe=1.0)
+    assert eight > two
+
+
+def test_min_backtest_length_falls_as_the_claimed_sharpe_rises() -> None:
+    """A larger edge is harder for a search of N to have produced from noise."""
+    modest = minimum_backtest_length(n_trials=4, target_sharpe=0.5)
+    strong = minimum_backtest_length(n_trials=4, target_sharpe=2.0)
+    assert strong < modest
+
+
+def test_min_backtest_length_matches_the_published_worked_values() -> None:
+    """At an annualised Sharpe of 1.0 the requirement is exactly `2 ln(N)` years."""
+    assert minimum_backtest_length(n_trials=2, target_sharpe=1.0) == pytest.approx(2 * math.log(2))
+    assert minimum_backtest_length(n_trials=8, target_sharpe=1.0) == pytest.approx(2 * math.log(8))
+
+
+@pytest.mark.parametrize(
+    ("n_trials", "target_sharpe", "message"),
+    [
+        (1, 1.0, "n_trials 1 must be at least 2"),
+        (4, 0.0, r"target_sharpe 0\.0 must be positive"),
+        (4, -1.0, r"target_sharpe -1\.0 must be positive"),
+    ],
+)
+def test_min_backtest_length_refuses_undefined_inputs(
+    n_trials: int, target_sharpe: float, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        minimum_backtest_length(n_trials=n_trials, target_sharpe=target_sharpe)
+
+
+# ── Harvey and Liu haircuts ─────────────────────────────────────────────────
+
+
+def test_holm_and_bonferroni_agree_on_the_search_winner() -> None:
+    """Holm's step-down prefix is one term at the smallest p-value.
+
+    Worth pinning because it is the reason Holm is reported at all: it says
+    explicitly that the step-down refinement never rescues the number we are
+    actually deflating.
+    """
+    report = haircut_sharpe(0.09, trial_sharpes=[0.09, 0.03, 0.01], n_observations=500)
+    assert report.holm_p == report.bonferroni_p
+
+
+def test_a_wider_search_takes_more_off() -> None:
+    narrow = haircut_sharpe(0.09, trial_sharpes=[0.09, 0.03], n_observations=500)
+    wide = haircut_sharpe(0.09, trial_sharpes=[0.09, *([0.03] * 20)], n_observations=500)
+    assert wide.bonferroni < narrow.bonferroni
+
+
+def test_bhy_is_harsher_than_bonferroni_around_a_lone_strong_trial() -> None:
+    """Yekutieli's `c(N)` factor scales the whole step-up, so it starts above Bonferroni.
+
+    The opposite of the usual "FDR is the lenient one" summary, and the case our
+    sweeps are in: nested variants around one weak edge.
+    """
+    report = haircut_sharpe(0.08, trial_sharpes=[0.08, 0.02, -0.01], n_observations=400)
+    assert report.bhy_p > report.bonferroni_p
+
+
+def test_bhy_is_milder_when_several_trials_are_jointly_strong() -> None:
+    """The step-up minimum is pulled down by a lower-ranked test that is itself strong."""
+    report = haircut_sharpe(0.08, trial_sharpes=[0.08, 0.075, 0.07, 0.065], n_observations=400)
+    assert report.bhy_p < report.bonferroni_p
+
+
+def test_a_haircut_is_undefined_for_a_sharpe_that_was_never_positive() -> None:
+    """Returning zero would read as "the correction cost nothing"."""
+    report = haircut_sharpe(-0.05, trial_sharpes=[-0.05, -0.09], n_observations=400)
+    assert report.haircut(report.bonferroni) is None
+
+
+def test_the_haircut_is_a_fraction_of_the_observed_sharpe() -> None:
+    report = haircut_sharpe(0.09, trial_sharpes=[0.09, 0.03], n_observations=500)
+    cut = report.haircut(report.bonferroni)
+    assert cut is not None
+    assert report.bonferroni == pytest.approx(report.observed * (1 - cut))
+
+
+def test_a_correction_that_exhausts_the_p_value_leaves_no_sharpe() -> None:
+    """At `p >= 1` the adjusted Sharpe is exactly zero, not a near-zero artefact."""
+    report = haircut_sharpe(0.01, trial_sharpes=[0.01, *([0.005] * 300)], n_observations=100)
+    assert report.bonferroni_p == 1.0
+    assert report.bonferroni == 0.0
+
+
+def test_the_haircut_is_unit_free() -> None:
+    """A ratio of Sharpe ratios, so annualising the inputs cannot move it.
+
+    Only the *ratio* is unit-free: the p-values themselves depend on the sample
+    size, so both calls have to describe the same experiment.
+    """
+    report = haircut_sharpe(0.09, trial_sharpes=[0.09, 0.03], n_observations=500)
+    cut = report.haircut(report.bonferroni)
+    assert cut is not None
+    assert 0.0 < cut < 1.0
+
+
+@pytest.mark.parametrize(
+    ("trial_sharpes", "n_observations", "message"),
+    [
+        ([], 100, "a haircut needs at least one trial"),
+        ([0.1], 1, "n_observations 1 cannot carry a t-statistic"),
+    ],
+)
+def test_the_haircut_refuses_a_sample_it_cannot_test(
+    trial_sharpes: list[float], n_observations: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        haircut_sharpe(0.1, trial_sharpes=trial_sharpes, n_observations=n_observations)

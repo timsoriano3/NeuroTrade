@@ -45,12 +45,15 @@ from statistics import NormalDist, StatisticsError, correlation
 from typing import Final
 
 __all__ = [
+    "HaircutReport",
     "Moments",
     "OverfittingReport",
     "annualized",
     "deflated_sharpe_ratio",
     "effective_n_trials",
     "expected_max_sharpe",
+    "haircut_sharpe",
+    "minimum_backtest_length",
     "moments",
     "probabilistic_sharpe_ratio",
     "probability_of_backtest_overfitting",
@@ -552,3 +555,280 @@ def _column_sharpe(rows: Sequence[Sequence[float]], column: int) -> float:
         return sharpe_ratio(series)
     except ValueError:
         return 0.0
+
+
+def minimum_backtest_length(*, n_trials: int, target_sharpe: float) -> float:
+    """Years of out-of-sample a search of this size needs before it means anything.
+
+    Bailey, Borwein, Lopez de Prado and Zhu, *Pseudo-Mathematics and Financial
+    Charlatanism* (Notices of the AMS 61(5), 2014), observe that the expected
+    maximum annualised Sharpe of `N` independent worthless trials over `T` years
+    is about `sqrt(2 * ln(N) / T)` — the same asymptotic `expected_max_sharpe`
+    is built on, in annualised units. Setting that equal to the in-sample Sharpe
+    actually reported and solving for `T` gives the shortest sample in which
+    that Sharpe is not simply what looking `N` times produces from noise. The
+    rearrangement is arithmetic, not a second result from the paper.
+
+    **Why print it.** Plan decision 1 keeps each strategy's trials in their own
+    family, so `N` stays small and the requirement stays modest. Pooling families
+    would change that sharply and silently — at an in-sample Sharpe of 1.0 a
+    two-variant search needs 1.4 years and an eight-variant one needs 4.2, which
+    is more than the crawl holds. Reporting the number makes the choice visible
+    rather than implicit.
+
+    Args:
+        n_trials: Independent hypotheses the search burned. At least 2, since a
+            search of one has no maximum to be flattered by.
+        target_sharpe: The **annualised** in-sample Sharpe being claimed. Every
+            other function in this module is per-period; this one is not, because
+            the result is a span in years and the two have to agree.
+
+    Returns:
+        The required sample length, in years.
+
+    Raises:
+        ValueError: If `n_trials` is below 2, or `target_sharpe` is not strictly
+            positive — a non-positive Sharpe needs no defending against selection
+            bias, and dividing by it would hand back a negative or infinite span.
+
+    Example:
+        Two variants, claiming an annualised Sharpe of 1.0:
+
+        >>> round(minimum_backtest_length(n_trials=2, target_sharpe=1.0), 2)
+        1.39
+        >>> round(minimum_backtest_length(n_trials=8, target_sharpe=1.0), 2)
+        4.16
+    """
+    if n_trials < 2:
+        raise ValueError(f"n_trials {n_trials} must be at least 2")
+    if target_sharpe <= 0:
+        raise ValueError(f"target_sharpe {target_sharpe} must be positive")
+    return 2.0 * math.log(n_trials) / target_sharpe**2
+
+
+@dataclass(frozen=True, slots=True)
+class HaircutReport:
+    """What three multiple-testing corrections do to one Sharpe ratio.
+
+    Harvey and Liu, *Evaluating Trading Strategies* (Journal of Portfolio
+    Management 40(5), 2014; SSRN 2474755), run the correction in **p-value
+    space**: convert the Sharpe to a t-statistic, adjust its p-value for the
+    number of tests, then convert back. That is a second opinion on `deflated`
+    from entirely different machinery — DSR asks how the best of N worthless
+    tries would have scored, these ask how surprising this p-value is among N.
+
+    The three disagree on purpose. Bonferroni is the crudest and assumes the
+    tests are independent. Holm is a step-down refinement of it and, **for the
+    smallest p-value in the set, gives exactly the same answer** — which is worth
+    knowing, because the smallest p-value is always the one we are deflating.
+    BHY controls the false-discovery rate instead of the family-wise error rate,
+    and is the only one of the three that reads the shape of the p-value
+    distribution rather than only its size.
+
+    **BHY is not the lenient one here, and that surprised us.** Yekutieli's
+    `c(N)` factor — the harmonic sum that buys validity under arbitrary
+    dependence — multiplies its whole scale, so at the *winner's* rank it starts
+    out `c(N)` times harsher than Bonferroni and only comes back under when some
+    lower-ranked test is itself strong enough to pull the step-up minimum down.
+    Measured on a search of three: one strong trial beside two weak ones gives
+    Bonferroni 0.329 and BHY 0.603, while four jointly strong trials give
+    Bonferroni 0.438 and BHY 0.403. A sweep of nested variants around one weak
+    edge is the first case, which is ours.
+
+    The haircut is a ratio of Sharpe ratios, so it is unit-free: it is the same
+    number whether the inputs are per-period or annualised.
+
+    Example:
+        >>> report = HaircutReport(observed=0.05, n_observations=400, n_trials=2,
+        ...                        p_value=0.32, bonferroni_p=0.63, holm_p=0.63, bhy_p=0.47)
+        >>> report.haircut(report.bonferroni) is not None
+        True
+    """
+
+    observed: float  # the Sharpe under test, per period, net of costs
+    n_observations: int  # returns it was computed from
+    n_trials: int  # tests it is being corrected for
+    p_value: float  # its own two-sided p-value, uncorrected
+    bonferroni_p: float  # p-value after the Bonferroni correction
+    holm_p: float  # after Holm's step-down correction
+    bhy_p: float  # after Benjamini-Hochberg-Yekutieli
+
+    @property
+    def bonferroni(self) -> float:
+        """Sharpe ratio implied by `bonferroni_p` at the same sample size."""
+        return _sharpe_for_p(self.bonferroni_p, self.n_observations)
+
+    @property
+    def holm(self) -> float:
+        """Sharpe ratio implied by `holm_p`."""
+        return _sharpe_for_p(self.holm_p, self.n_observations)
+
+    @property
+    def bhy(self) -> float:
+        """Sharpe ratio implied by `bhy_p`."""
+        return _sharpe_for_p(self.bhy_p, self.n_observations)
+
+    def haircut(self, adjusted: float) -> float | None:
+        """Fraction of the observed Sharpe one correction takes away.
+
+        Args:
+            adjusted: One of `bonferroni`, `holm`, `bhy`.
+
+        Returns:
+            `1 - adjusted / observed`, or `None` when `observed` is not positive.
+            A haircut off a Sharpe that was already negative is not a defined
+            quantity — there is no performance to discount — and returning zero
+            would read as "the correction cost nothing".
+
+        Example:
+            >>> report = HaircutReport(observed=-0.05, n_observations=400, n_trials=2,
+            ...                        p_value=0.32, bonferroni_p=0.63, holm_p=0.63,
+            ...                        bhy_p=0.47)
+            >>> report.haircut(report.bhy) is None
+            True
+        """
+        if self.observed <= 0:
+            return None
+        return 1.0 - adjusted / self.observed
+
+    def __str__(self) -> str:
+        def shown(adjusted: float) -> str:
+            cut = self.haircut(adjusted)
+            return f"{adjusted:+.4f}" if cut is None else f"{adjusted:+.4f} (-{cut:.0%})"
+
+        return (
+            f"p={self.p_value:.3f} over {self.n_trials} tests -> "
+            f"bonferroni {shown(self.bonferroni)} "
+            f"holm {shown(self.holm)} bhy {shown(self.bhy)}"
+        )
+
+
+def haircut_sharpe(
+    observed: float,
+    *,
+    trial_sharpes: Sequence[float],
+    n_observations: int,
+) -> HaircutReport:
+    """Discount a Sharpe ratio for the number of tests that produced it.
+
+    Args:
+        observed: The Sharpe under test, per period. Normally the maximum of
+            `trial_sharpes`, which is the one a search would have reported.
+        trial_sharpes: Every Sharpe in the search, including `observed` itself.
+            The whole set is needed because BHY reads the shape of the p-value
+            distribution, not only its size — that is what makes it a different
+            opinion rather than a rescaled Bonferroni.
+        n_observations: Returns each Sharpe was computed from. Shared across the
+            trials, which holds here because the variants are scored over one
+            aligned candidate set.
+
+    Returns:
+        The report. Every method is reported; none is the answer.
+
+    Raises:
+        ValueError: If `trial_sharpes` is empty or `n_observations` is below 2 —
+            a t-statistic needs a sample.
+
+    Example:
+        A modest Sharpe drawn from a search of three. Bonferroni and Holm agree,
+        because `observed` carries the smallest p-value in the set.
+
+        >>> report = haircut_sharpe(0.08, trial_sharpes=[0.08, 0.02, -0.01],
+        ...                         n_observations=400)
+        >>> report.bonferroni_p == report.holm_p
+        True
+
+        With the rest of the search weak, BHY is the harshest of the three; with
+        four jointly strong trials it is the mildest. Both directions matter, so
+        both are reported and neither is the answer.
+
+        >>> report.bhy_p > report.bonferroni_p
+        True
+        >>> together = haircut_sharpe(0.08, trial_sharpes=[0.08, 0.075, 0.07, 0.065],
+        ...                           n_observations=400)
+        >>> together.bhy_p < together.bonferroni_p
+        True
+    """
+    if not trial_sharpes:
+        raise ValueError("a haircut needs at least one trial")
+    if n_observations < 2:
+        raise ValueError(f"n_observations {n_observations} cannot carry a t-statistic")
+
+    n_trials = len(trial_sharpes)
+    p_values = sorted(_p_for_sharpe(value, n_observations) for value in trial_sharpes)
+    own = _p_for_sharpe(observed, n_observations)
+    # The rank the observed p-value occupies among the trials', 1-based. Found by
+    # value rather than by position because `observed` need not be an element of
+    # `trial_sharpes` — a caller may deflate a pooled winner against a family
+    # whose stored Sharpes were computed elsewhere.
+    rank = 1 + sum(1 for value in p_values if value < own)
+
+    return HaircutReport(
+        observed=observed,
+        n_observations=n_observations,
+        n_trials=n_trials,
+        p_value=own,
+        bonferroni_p=min(1.0, n_trials * own),
+        holm_p=_holm(p_values, own, rank),
+        bhy_p=_bhy(p_values, rank),
+    )
+
+
+def _holm(p_values: Sequence[float], own: float, rank: int) -> float:
+    """Holm's step-down adjusted p-value at one rank.
+
+    `max` over the prefix, which is what enforces monotonicity: an adjusted
+    p-value may not fall below one assigned to a more significant test. For the
+    smallest p-value the prefix is a single term and the result is `N * p`, i.e.
+    Bonferroni — stated in `HaircutReport` because it means Holm never rescues a
+    search's winner, only its runners-up.
+    """
+    n_trials = len(p_values)
+    prefix = [*p_values[: rank - 1], own]
+    return min(1.0, max((n_trials - index) * value for index, value in enumerate(prefix)))
+
+
+def _bhy(p_values: Sequence[float], rank: int) -> float:
+    """Benjamini-Hochberg-Yekutieli adjusted p-value at one rank.
+
+    Step-*up*: the minimum over the suffix, so a large p-value further down the
+    ordering can pull an adjusted p-value below its own Bonferroni level. `c(N)`
+    is the harmonic sum Yekutieli's correction adds so the guarantee survives
+    arbitrary dependence between the tests, which is the case that matters here —
+    nested parameter variants of one rule are about as dependent as tests get.
+    """
+    n_trials = len(p_values)
+    harmonic = math.fsum(1.0 / index for index in range(1, n_trials + 1))
+    scaled = [
+        min(1.0, n_trials * harmonic * value / index)
+        for index, value in enumerate(p_values, start=1)
+    ]
+    return min(scaled[rank - 1 :])
+
+
+def _p_for_sharpe(sharpe: float, n_observations: int) -> float:
+    """Two-sided p-value of a per-period Sharpe ratio.
+
+    `t = SR * sqrt(n)` under the null of a zero Sharpe, read against the normal
+    rather than Student's t: at the sample sizes a pooled measurement produces
+    (thousands of observations) the two agree to more decimals than anything
+    downstream prints, and the rest of this module is normal-based already.
+
+    Two-sided, matching Harvey and Liu's own worked examples, where a
+    t-statistic of 3.0 is quoted as p = 0.0027. A one-sided test would halve
+    every p-value here and make every haircut look smaller.
+    """
+    statistic = abs(sharpe) * math.sqrt(n_observations)
+    return 2.0 * (1.0 - _NORMAL.cdf(statistic))
+
+
+def _sharpe_for_p(p_value: float, n_observations: int) -> float:
+    """The per-period Sharpe ratio a two-sided p-value implies. Inverse of `_p_for_sharpe`.
+
+    Returns 0.0 at `p >= 1`: the correction has taken the whole result, and
+    `inv_cdf(0.5)` is exactly zero anyway — spelled out so the boundary does not
+    depend on floating-point luck.
+    """
+    if p_value >= 1.0:
+        return 0.0
+    return _NORMAL.inv_cdf(1.0 - p_value / 2.0) / math.sqrt(n_observations)

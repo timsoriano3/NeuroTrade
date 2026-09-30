@@ -1626,6 +1626,110 @@ symbol. Nothing here detects that; `unexplained_gaps` is the tool for it, and
 today only `actions check` runs it, on daily bars."""
 
 
+DEFAULT_MEASURE_QUANTITY: Final = 1_000
+"""Shares every modelled fill is charged at, unless `--quantity` says otherwise.
+
+A thousand because that is what every number this project has quoted was
+measured at — it was hardcoded here before it was a flag, so keeping it as the
+default is what makes a new run comparable with the recorded ones rather than
+silently better or worse."""
+
+_REFERENCE_SPREAD_BPS: Final = 5.0
+"""`FlooredSpread`'s default proportional estimate, in basis points. Restated here
+only so the cost curve can print what `1x` means."""
+
+_REFERENCE_PER_SHARE: Final = Decimal("0.005")
+"""`FeeSchedule`'s default commission per share. Same reason."""
+
+DEFAULT_COST_MULTIPLES: Final = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
+"""Cost multiples swept when `--cost-curve` is given without a list.
+
+Dense between 1 and 2 because that is where a 1.5 bp edge crosses zero, and
+sparse above 4 because past there the answer is only "not close". Eight levels
+is eight extra labelling passes and no extra backtest."""
+
+DEFAULT_COST_MULTIPLES_TEXT: Final = ",".join(f"{value:g}" for value in DEFAULT_COST_MULTIPLES)
+"""The default sweep as the flag would be typed, for the help text."""
+
+
+def _reference_costs() -> CostModel:
+    """The `1x` cost model: IBKR's US fixed tier against a 5 bp floored spread.
+
+    One function so the reference the curve is quoted against and the reference
+    the headline number is measured at cannot drift apart.
+    """
+    return CostModel(spreads=FlooredSpread(), fees=FeeSchedule())
+
+
+def _scaled_costs(scale: float) -> CostModel:
+    """The reference cost model with every scalable term multiplied by `scale`.
+
+    **Two floors do not scale, and that is the point.** `FlooredSpread` never
+    returns less than one tick, and `FeeSchedule` caps commission at 1% of trade
+    value. So a `0.5x` point is not half the cost of `1x` on a cheap name, and the
+    curve is quoted as multiples of the *model* rather than of realised
+    cents-per-share for exactly that reason.
+
+    Args:
+        scale: Multiple of the reference terms. Zero is permitted and leaves the
+            tick floor standing, which is the closest this cost model comes to
+            free.
+
+    Returns:
+        The scaled model.
+
+    Raises:
+        ValueError: If `scale` is negative — a negative cost pays the strategy to
+            trade, which `FlooredSpread` refuses anyway and which is the single
+            most effective way to manufacture an edge that is not there.
+    """
+    if scale < 0:
+        raise ValueError(f"cost scale {scale} must not be negative")
+    factor = Decimal(str(scale))
+    # Scaled off instances of the reference rather than off class attributes:
+    # both cost dataclasses are `slots=True`, so their defaults are not readable
+    # from the class, and going through `_reference_costs` keeps one definition of
+    # what `1x` means.
+    reference = _reference_costs()
+    assert isinstance(reference.spreads, FlooredSpread)  # the reference, by construction
+    return CostModel(
+        spreads=FlooredSpread(
+            fraction=reference.spreads.fraction * factor,
+            minimum=reference.spreads.minimum * factor,
+        ),
+        fees=FeeSchedule(
+            per_share=reference.fees.per_share * factor,
+            minimum=reference.fees.minimum * factor,
+        ),
+    )
+
+
+def _cost_levels(specification: str | None) -> tuple[tuple[float, CostModel], ...]:
+    """Parse `--cost-curve` into the levels `measure_strategy` sweeps.
+
+    Args:
+        specification: Comma-separated multiples, an empty string for the
+            defaults, or `None` for no curve at all. An empty string and `None`
+            are deliberately different: `--cost-curve ""` asks for the default
+            sweep, while omitting the flag asks for nothing.
+
+    Returns:
+        `(scale, model)` pairs, ascending and de-duplicated. Empty when no curve
+        was asked for.
+
+    Raises:
+        ValueError: If a field is not a number, or is negative.
+    """
+    if specification is None:
+        return ()
+    fields = [field.strip() for field in specification.split(",") if field.strip()]
+    try:
+        scales = sorted({float(field) for field in fields}) or list(DEFAULT_COST_MULTIPLES)
+    except ValueError as error:
+        raise ValueError(f"{error} — expected numbers like {DEFAULT_COST_MULTIPLES_TEXT}") from None
+    return tuple((scale, _scaled_costs(scale)) for scale in scales)
+
+
 @lab_app.command("measure")
 def lab_measure(
     ctx: typer.Context,
@@ -1667,6 +1771,24 @@ def lab_measure(
     universe_path: Annotated[
         Path, typer.Option("--universe", help="Universe file naming the instruments.")
     ] = _DEFAULT_UNIVERSE,
+    quantity: Annotated[
+        int,
+        typer.Option(
+            "--quantity",
+            help="Shares every modelled fill is charged at. Costs are not linear in it.",
+        ),
+    ] = DEFAULT_MEASURE_QUANTITY,
+    cost_curve: Annotated[
+        str | None,
+        typer.Option(
+            "--cost-curve",
+            help=(
+                "Comma-separated cost multiples to re-label the winner at, "
+                f"e.g. {DEFAULT_COST_MULTIPLES_TEXT}. Costs the labelling, not a second "
+                "backtest."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Measure a strategy on the corpus: every variant it declares, pooled.
 
@@ -1697,9 +1819,23 @@ def lab_measure(
     unadjusted 10:1 is a 90% overnight fall and adjusting an already-adjusted
     one is a 906% rise, and the labeller can detect neither.
 
+    **Size is on the command line because it is load-bearing.** `FeeSchedule` has
+    a per-order floor and `FlooredSpread` a per-share one, so a 1.5 bp edge is or
+    is not real depending on how many shares each fill is charged at. Every number
+    this project quoted before `--quantity` existed was at 1,000 shares of every
+    name, which was a hardcoded assumption nobody chose.
+
+    **`--cost-curve` answers "how much cost does this survive".** Costs enter only
+    inside the labeller, after the engine has already produced the intents, so
+    re-labelling the same pass at several cost levels costs one labelling pass
+    each and no extra backtest. The break-even multiple is what the plan compares
+    against when it rejects a strategy on cost — it rejected single-instrument ORB
+    at 2.2 cents/share and had never computed our own.
+
     Example:
         $ neurotrade lab measure --strategy gap_continuation --start 2022-09-30 \
-              --end 2023-09-30 --source firstrate
+              --end 2023-09-30 --source firstrate --quantity 500 \
+              --cost-curve 0.5,1,2,4
     """
     app_context: AppContext = ctx.obj
     settings = app_context.settings
@@ -1779,6 +1915,15 @@ def lab_measure(
             typer.echo(f"    {symbol} {action}", err=True)
         corpus = adjusting
 
+    if quantity < 1:
+        typer.echo(f"--quantity {quantity} must be at least one share", err=True)
+        raise typer.Exit(code=2)
+    try:
+        levels = _cost_levels(cost_curve)
+    except ValueError as error:
+        typer.echo(f"--cost-curve {cost_curve}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
     measurement = measure_strategy(
         cls,
         store=corpus,
@@ -1789,9 +1934,10 @@ def lab_measure(
         end=last,
         ledger=ledger,
         clock=SimClock(clock.now_ns()),
-        costs=CostModel(spreads=FlooredSpread(), fees=FeeSchedule()),
-        quantity=Quantity(1_000),
+        costs=_reference_costs(),
+        quantity=Quantity(quantity),
         warmup_ns=warmup_days * 86_400_000_000_000,
+        cost_levels=levels,
     )
 
     for run in measurement.runs:
@@ -1828,6 +1974,16 @@ def lab_measure(
                     f"             {symbol!s:<14} trades={n_trades:<5} exp={expectancy:+.5f}",
                     err=True,
                 )
+        if measurement.costs is not None:
+            typer.echo(
+                f"           cost curve on {measurement.costs.variant} "
+                f"(1x = {_REFERENCE_SPREAD_BPS:g} bps spread, "
+                f"${_REFERENCE_PER_SHARE} per share, at {quantity} shares; "
+                "the one-tick spread floor does not scale):",
+                err=True,
+            )
+            for point in measurement.costs.points:
+                typer.echo(f"             {point}", err=True)
 
     typer.echo(measurement.digest)
     if measurement.evaluation is None:

@@ -33,7 +33,17 @@ from neurotrade.adapters.ibkr.connection import IbkrConnectionError
 from neurotrade.adapters.ibkr.market_data import VwapDrop
 from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.adapters.storage.parquet_store import ParquetStore
-from neurotrade.cli import _SEED_PROVENANCE, PRE_ADJUSTED_SOURCES, _seed_feed, _SeedJob, app
+from neurotrade.cli import (
+    _SEED_PROVENANCE,
+    DEFAULT_COST_MULTIPLES,
+    PRE_ADJUSTED_SOURCES,
+    _cost_levels,
+    _reference_costs,
+    _scaled_costs,
+    _seed_feed,
+    _SeedJob,
+    app,
+)
 from neurotrade.config import Profile, config_hash, load_settings
 from neurotrade.core.clock import LiveClock, SimClock, to_nanos
 from neurotrade.core.events import Bar, BarInterval, Event
@@ -1561,3 +1571,48 @@ def test_the_seed_vendors_are_recorded_as_unadjusted() -> None:
 def test_every_measurable_source_declares_a_basis() -> None:
     """A source with a corpus root but no entry here would raise at measure time."""
     assert set(PRE_ADJUSTED_SOURCES) == {"ibkr", "firstrate", "kibot"}
+
+
+# ── the cost curve's levels ─────────────────────────────────────────────
+
+
+def test_omitting_the_cost_curve_flag_asks_for_no_levels() -> None:
+    """`None` and an empty string are deliberately different."""
+    assert _cost_levels(None) == ()
+
+
+def test_an_empty_cost_curve_asks_for_the_default_sweep() -> None:
+    assert [scale for scale, _ in _cost_levels("")] == list(DEFAULT_COST_MULTIPLES)
+
+
+def test_levels_come_back_sorted_and_deduplicated() -> None:
+    """`CostCurve.break_even` interpolates between adjacent points."""
+    assert [scale for scale, _ in _cost_levels("4,0.5,1,4")] == [0.5, 1.0, 4.0]
+
+
+def test_a_non_numeric_level_is_rejected_with_the_expected_shape() -> None:
+    with pytest.raises(ValueError, match="expected numbers like"):
+        _cost_levels("1,cheap,4")
+
+
+def test_a_negative_cost_level_is_refused() -> None:
+    """A negative cost pays the strategy to trade — the surest way to fake an edge."""
+    with pytest.raises(ValueError, match=r"cost scale -1\.0 must not be negative"):
+        _cost_levels("-1")
+
+
+def test_the_reference_model_is_exactly_one_times_itself() -> None:
+    """One definition of `1x`, so the curve and the headline cannot drift apart."""
+    reference, scaled = _reference_costs(), _scaled_costs(1.0)
+    assert reference.spreads.spread(Price("100")) == scaled.spreads.spread(Price("100"))
+    assert reference.fees.commission(Quantity(500), Price("100")) == scaled.fees.commission(
+        Quantity(500), Price("100")
+    )
+
+
+def test_scaling_raises_commission_but_leaves_the_tick_floor_standing() -> None:
+    """The floors are why the curve is quoted in model multiples, not in cents a share."""
+    dear = _scaled_costs(4.0)
+    assert dear.fees.commission(Quantity(1_000), Price("100")).amount == Decimal("20.00000000")
+    # Every scalable spread term is zero, and the result is still one tick.
+    assert _scaled_costs(0.0).spreads.spread(Price("100")) == Decimal("0.01")

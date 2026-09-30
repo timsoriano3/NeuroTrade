@@ -17,7 +17,8 @@ difference.
 | `engine.py` | Runs strategies over that stream and collects their intents |
 | `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
-| `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
+| `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV, MinBTL, and Harvey-Liu haircuts |
+| `bootstrap.py` | How many *independent* bets a dependent sample is worth: resample whole sessions, read the effective observation count off the spread |
 | `regimes.py` | Which volatility regimes a result earned in: trailing session volatility, terciles, per-bucket expectancy (§15) |
 | `trials.py` | The ledger the deflation counts against — every hypothesis tested, by anything |
 | `evaluation.py` | Decisions in, a deflated verdict out: labels, the ledger, CPCV paths, PBO, expectancy |
@@ -39,6 +40,14 @@ looked**. The best of 500 tries posts a fine Sharpe ratio even when all 500 are
 worthless, so the deflated Sharpe sets the hurdle at what the search itself
 would have produced from noise, and PBO asks the blunter question of whether
 picking the in-sample winner beats picking at random.
+
+`bootstrap.py` answers the question those two leave open: **how big is the
+sample, really?** Both the PSR and the DSR carry `sqrt(n - 1)`, and `n` is the
+number of decisions, not the number of independent bets — a strategy deciding
+seven times in a session has read that session once. `evaluation.py` reports the
+two ends of that interval (`deflated` at the raw count, `deflated_clustered` at
+the session count) and neither is the answer. Resampling whole sessions measures
+where between them it sits, and `measure.py` charges a third DSR at that count.
 
 `trials.py` supplies the number of tries. It has to be persistent and
 append-only, because the count that matters includes the searches nobody kept —

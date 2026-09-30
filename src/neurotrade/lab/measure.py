@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from statistics import fmean
@@ -43,6 +43,7 @@ from neurotrade.core.ports import CalendarPort, StoragePort
 from neurotrade.core.trials import TrialSource
 from neurotrade.core.types import Quantity, Symbol
 from neurotrade.features.registry import FeatureRegistry
+from neurotrade.lab.bootstrap import DEFAULT_RESAMPLES, SharpeInterval, bootstrap_sharpe
 from neurotrade.lab.cv import CombinatorialPurgedCV
 from neurotrade.lab.engine import BacktestEngine
 from neurotrade.lab.evaluation import (
@@ -64,11 +65,26 @@ from neurotrade.lab.regimes import (
     coverage_of,
     trailing_volatility,
 )
+from neurotrade.lab.significance import (
+    HaircutReport,
+    annualized,
+    haircut_sharpe,
+    minimum_backtest_length,
+    moments,
+    sharpe_ratio,
+)
 from neurotrade.lab.trials import TrialLedger
 from neurotrade.strategies.base import Strategy
 from neurotrade.strategies.context import MarketContext
 
-__all__ = ["DEFAULT_EMBARGO_NS", "Measurement", "SymbolRun", "measure_strategy"]
+__all__ = [
+    "DEFAULT_EMBARGO_NS",
+    "CostCurve",
+    "CostPoint",
+    "Measurement",
+    "SymbolRun",
+    "measure_strategy",
+]
 
 DEFAULT_EMBARGO_NS: Final = 86_400_000_000_000
 """One calendar day of embargo, in nanoseconds.
@@ -80,6 +96,103 @@ features behind it are built from the same sessions.
 """
 
 _NOT_ENOUGH = "the corpus supports no verdict"
+
+_NANOS_PER_YEAR: Final = 31_557_600_000_000_000
+"""Julian year, in nanoseconds — 365.25 days.
+
+Used only to turn a per-observation Sharpe into an annualised one for
+`minimum_backtest_length`, which is stated in years. Calendar years rather than
+252 trading days on purpose: the span being converted is a wall-clock window,
+weekends included, and the observation count already carries how often the
+strategy actually decided inside it."""
+
+
+@dataclass(frozen=True, slots=True)
+class CostPoint:
+    """What the winning variant earned at one cost level.
+
+    Example:
+        >>> CostPoint(scale=2.0, n_trades=100, expectancy=-0.0004, sharpe=-0.02).label
+        '2x'
+    """
+
+    scale: float  # multiple of the reference cost model this level charges
+    n_trades: int  # labelled trades at this level; costs cannot change the count
+    expectancy: float  # mean return per trade, net of this level's costs
+    sharpe: float  # per-observation Sharpe at this level, over the same candidates
+
+    @property
+    def label(self) -> str:
+        """The level, as it appears in a printed curve."""
+        return f"{self.scale:g}x"
+
+    def __str__(self) -> str:
+        return f"{self.label:<6} exp={self.expectancy:+.5f}/trade sharpe={self.sharpe:+.4f}"
+
+
+@dataclass(frozen=True, slots=True)
+class CostCurve:
+    """The winning variant's expectancy as modelled costs rise.
+
+    **Nearly free, and that is why it exists.** Costs enter only inside
+    `label_signals`, after the engine has already turned bars into intents, so one
+    engine pass can be re-labelled at every level on the curve. The expensive half
+    of a measurement is not repeated.
+
+    **The variant is fixed at the reference level, deliberately.** Re-choosing a
+    winner at each cost level would be a fresh search at every point and would
+    need its own trials; what a break-even cost answers is "how much cost does
+    *this* result survive", which is a question about one variant.
+
+    Example:
+        >>> curve = CostCurve(variant="VM 1", points=(
+        ...     CostPoint(scale=1.0, n_trades=100, expectancy=0.0002, sharpe=0.01),
+        ...     CostPoint(scale=2.0, n_trades=100, expectancy=-0.0002, sharpe=-0.01),
+        ... ))
+        >>> curve.break_even
+        1.5
+    """
+
+    variant: str  # the variant the curve follows, chosen at the reference level
+    points: tuple[CostPoint, ...]  # ascending by scale
+
+    @property
+    def break_even(self) -> float | None:
+        """The cost multiple at which expectancy crosses zero.
+
+        Linearly interpolated between the two points that straddle the crossing.
+        Linear because expectancy is a mean of per-trade returns and every term
+        in the cost model is either proportional to size or a per-order floor, so
+        the relationship is close to affine over a handful of levels — not
+        because the curve was measured densely enough to fit anything better.
+
+        Returns:
+            The multiple, or `None` when the curve never crosses: either already
+            negative at the cheapest level measured, or still positive at the
+            dearest. Both are findings, and `__str__` says which.
+
+        Example:
+            >>> CostCurve(variant="a", points=(
+            ...     CostPoint(scale=1.0, n_trades=9, expectancy=-0.001, sharpe=-0.1),
+            ... )).break_even is None
+            True
+        """
+        for earlier, later in zip(self.points, self.points[1:], strict=False):
+            if earlier.expectancy > 0 >= later.expectancy:
+                span = earlier.expectancy - later.expectancy
+                return earlier.scale + (later.scale - earlier.scale) * earlier.expectancy / span
+        return None
+
+    def __str__(self) -> str:
+        levels = "  ".join(f"{point.label}:{point.expectancy:+.5f}" for point in self.points)
+        crossing = self.break_even
+        if crossing is not None:
+            verdict = f"break-even at {crossing:.2f}x"
+        elif self.points and self.points[0].expectancy <= 0:
+            verdict = "negative at every level measured"
+        else:
+            verdict = f"still positive at {self.points[-1].label}" if self.points else "no levels"
+        return f"{self.variant} {levels}  -> {verdict}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +249,25 @@ class Measurement:
     evaluation: Evaluation | None  # None when the sample could not support one
     reason: str  # why there is no evaluation; empty when there is one
     regimes: RegimeCoverage | None = None  # per-volatility-bucket expectancy of the winner
+    interval: SharpeInterval | None = None  # session-bootstrapped bounds on the winner's Sharpe
+    deflated_bootstrapped: float | None = None  # DSR charged at the bootstrapped effective count
+    haircut: HaircutReport | None = None  # Harvey-Liu multiple-testing discount on the winner
+    min_backtest_years: float | None = None  # MinBTL: sample this search would need to be credible
+    sample_years: float | None = None  # wall-clock span measured, for comparison against MinBTL
+    costs: CostCurve | None = None  # expectancy against modelled cost; None when no levels swept
+
+    @property
+    def clears_min_backtest_length(self) -> bool | None:
+        """Whether the window measured is as long as MinBTL wants.
+
+        Returns:
+            `None` when either number is missing — a non-positive Sharpe has no
+            MinBTL, since there is no performance for selection bias to have
+            manufactured.
+        """
+        if self.min_backtest_years is None or self.sample_years is None:
+            return None
+        return self.sample_years >= self.min_backtest_years
 
     @property
     def is_measured(self) -> bool:
@@ -200,8 +332,27 @@ class Measurement:
         if self.evaluation is None:
             return f"{head}  NOT MEASURED — {self.reason}"
         gated = "gated" if self.regime_gated else "ungated"
-        tail = f"{head}  {self.evaluation}  sessions={self.n_sessions} {gated}"
-        return tail if self.regimes is None else f"{tail}\n           {self.regimes}"
+        lines = [f"{head}  {self.evaluation}  sessions={self.n_sessions} {gated}"]
+        if self.regimes is not None:
+            lines.append(f"           {self.regimes}")
+        if self.interval is not None:
+            bootstrapped = (
+                ""
+                if self.deflated_bootstrapped is None
+                else f" dsr_boot={self.deflated_bootstrapped:.3f}"
+            )
+            lines.append(f"           bootstrap: {self.interval}{bootstrapped}")
+        if self.haircut is not None:
+            lines.append(f"           haircut: {self.haircut}")
+        if self.min_backtest_years is not None and self.sample_years is not None:
+            verdict = "clears" if self.clears_min_backtest_length else "SHORT"
+            lines.append(
+                f"           minBTL: wants {self.min_backtest_years:.2f} yr, "
+                f"have {self.sample_years:.2f} yr — {verdict}"
+            )
+        if self.costs is not None:
+            lines.append(f"           costs: {self.costs}")
+        return "\n".join(lines)
 
 
 def measure_strategy(
@@ -226,6 +377,8 @@ def measure_strategy(
     family: str | None = None,
     ungated: bool = True,
     source: TrialSource = TrialSource.MANUAL,
+    cost_levels: Sequence[tuple[float, CostModel]] = (),
+    resamples: int = DEFAULT_RESAMPLES,
 ) -> Measurement:
     """Run every variant a strategy declares over the corpus and assess them.
 
@@ -261,6 +414,13 @@ def measure_strategy(
             which way it ran.
         source: What ran the search. `DISCOVERY` for an automated sweep, which
             §17 counts exactly like a manual one.
+        cost_levels: `(scale, model)` pairs to re-label the winning variant at,
+            for a break-even cost curve. Free of a second engine pass — costs
+            enter inside `label_signals` and nowhere earlier — so the only cost
+            is one extra labelling pass per level. Empty leaves `costs` `None`.
+            Not a search: the variant is chosen once at `costs`, so no level here
+            spends a trial.
+        resamples: Resamples for the session bootstrap on the winner's Sharpe.
 
     Returns:
         The measurement. `evaluation` is `None`, with a reason, when the pooled
@@ -301,6 +461,12 @@ def measure_strategy(
     parts: list[Part] = []
     runs: list[SymbolRun] = []
     session_ranges: dict[date, list[float]] = {}
+    # One accumulator per cost level per variant, filled inside the symbol loop
+    # while that symbol's bars are still in hand. Holding the bars to re-label
+    # afterwards is the trap `pool` already avoids: 58 instruments of minute bars
+    # is tens of millions of `Bar` objects, and all a cost curve needs from them
+    # is two floats per observation.
+    curve: list[list[_Level]] = [[_Level() for _ in labels] for _ in cost_levels]
     for symbol in ordered:
         bars = list(store.read_bars(symbol, interval, start, end))
         # A session's high-low range over its close: the volatility proxy the
@@ -374,6 +540,24 @@ def measure_strategy(
                 observations=observations,
             )
         )
+        for level, (_, model) in enumerate(cost_levels):
+            # Same bars, same candidates, same barriers — only the charge differs.
+            # `Signal.profit_target` and `stop_loss` come off the `Intent`, so a
+            # cost level cannot move which barrier was touched, only what the
+            # touch was worth. That is why the trade counts match across levels
+            # and a level's column stays aligned with the reference's.
+            scored = label_signals(
+                bars,
+                variants,
+                candidates=candidates,
+                horizon_bars=0,
+                costs=model,
+                quantity=quantity,
+            )
+            for column, (returns, touches) in enumerate(
+                zip(scored.returns, scored.trades, strict=True)
+            ):
+                curve[level][column].absorb(returns, touches)
         # Per instrument, per variant: what it actually earned. Pooling is what
         # makes the verdict, but a pooled number that is really one instrument's
         # is the failure mode pooling hides — `gap_continuation`'s first result
@@ -446,7 +630,124 @@ def measure_strategy(
             for touch in pooled.trades[evaluation.best_index]
         ),
     )
-    return replace(shell, evaluation=evaluation, regimes=coverage)
+    winner = pooled.returns[evaluation.best_index]
+    # The session each observation opened in — the bootstrap's resampling unit,
+    # and the same grouping `n_clusters` above charges the clustered DSR at.
+    sessions_of = tuple(to_datetime(opened).date() for opened, _ in pooled.spans)
+    # Named `bounds`, not `interval`: `interval` is this function's bar size.
+    bounds = bootstrap_sharpe(winner, sessions_of, n_resamples=resamples)
+    bootstrapped: float | None = None
+    if bounds is not None:
+        shape = moments(winner)
+        # The whole point of the interval: DSR charged at the sample size the
+        # dependence implies, rather than at either end of the bracket already
+        # reported. `deflate` only reads the family's history, so calling it a
+        # second time records nothing and cannot move the ledger.
+        bootstrapped = ledger.deflate(
+            evaluation.best_sharpe,
+            family=shell.family,
+            n_observations=max(2, round(bounds.effective_n)),
+            skew=shape.skew,
+            kurtosis=shape.kurtosis,
+        )
+    years = (end - start) / _NANOS_PER_YEAR
+    wanted: float | None = None
+    if evaluation.best_sharpe > 0 and years > 0 and evaluation.n_observations > 0:
+        # MinBTL is stated in years, so the Sharpe going into it has to be
+        # annualised — and the right frequency is how often this strategy decided,
+        # not how many bars the corpus held.
+        per_year = evaluation.n_observations / years
+        wanted = minimum_backtest_length(
+            n_trials=max(2, evaluation.n_variants),
+            target_sharpe=annualized(evaluation.best_sharpe, periods_per_year=per_year),
+        )
+    return replace(
+        shell,
+        evaluation=evaluation,
+        regimes=coverage,
+        interval=bounds,
+        deflated_bootstrapped=bootstrapped,
+        # Corrected against this sweep's own variants, not the family's history:
+        # BHY reads the shape of the p-value distribution and the ledger stores
+        # only Sharpe ratios computed over other samples, whose `n_observations`
+        # differ. `deflated` is what prices the family's whole history.
+        haircut=haircut_sharpe(
+            evaluation.best_sharpe,
+            trial_sharpes=[_pooled_sharpe(column) for column in pooled.returns],
+            n_observations=evaluation.n_observations,
+        ),
+        min_backtest_years=wanted,
+        sample_years=years,
+        costs=_curve_of(curve, cost_levels, evaluation.best_index, evaluation.best_label),
+    )
+
+
+@dataclass(slots=True)
+class _Level:
+    """One cost level's running totals for one variant, across every instrument.
+
+    Mutable and private: it exists only to keep the cost curve out of the trap
+    of holding every instrument's bars until the winner is known.
+    """
+
+    returns: list[float] = field(default_factory=list)
+    n_trades: int = 0
+    total: float = 0.0
+
+    def absorb(self, returns: Sequence[float], touches: Sequence[BarrierTouch | None]) -> None:
+        """Fold one instrument's column in."""
+        self.returns.extend(returns)
+        for touch in touches:
+            if touch is not None:
+                self.n_trades += 1
+                self.total += float(touch.realised_return)
+
+    @property
+    def expectancy(self) -> float:
+        """Mean return per trade. Zero when nothing traded, never `nan`."""
+        return self.total / self.n_trades if self.n_trades else 0.0
+
+
+def _curve_of(
+    curve: Sequence[Sequence[_Level]],
+    cost_levels: Sequence[tuple[float, CostModel]],
+    best_index: int,
+    best_label: str,
+) -> CostCurve | None:
+    """Assemble the break-even curve for the winning variant, or `None`.
+
+    Sorted by scale rather than trusting the caller's order, because
+    `CostCurve.break_even` interpolates between adjacent points and an unsorted
+    curve would interpolate between unrelated levels.
+    """
+    if not cost_levels:
+        return None
+    points = sorted(
+        (
+            CostPoint(
+                scale=scale,
+                n_trades=curve[level][best_index].n_trades,
+                expectancy=curve[level][best_index].expectancy,
+                sharpe=_pooled_sharpe(curve[level][best_index].returns),
+            )
+            for level, (scale, _) in enumerate(cost_levels)
+        ),
+        key=lambda point: point.scale,
+    )
+    return CostCurve(variant=best_label, points=tuple(points))
+
+
+def _pooled_sharpe(returns: Sequence[float]) -> float:
+    """Per-observation Sharpe, or 0.0 where variance is undefined.
+
+    `moments` raises on zero variance rather than reporting a zero stdev, and the
+    values have to be tested rather than the result read — the same trap
+    `lab/evaluation.py` documents: a sparse strategy leaves whole columns flat,
+    so this path is hit on every real measurement.
+    """
+    if len(returns) < 2 or len(set(returns)) < 2:
+        return 0.0
+    return sharpe_ratio(returns)
 
 
 def _expectancy(column: Sequence[BarrierTouch | None]) -> tuple[int, float]:

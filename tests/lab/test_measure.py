@@ -142,6 +142,7 @@ def measure(
     n_groups: int = 4,
     start: int | None = None,
     warmup_ns: int = 0,
+    cost_levels: Sequence[tuple[float, CostModel]] = (),
 ) -> tuple[Measurement, MemoryLedger]:
     """Run a measurement over a synthetic corpus, on a throwaway ledger."""
     store = MemoryLedger()
@@ -167,6 +168,11 @@ def measure(
         n_test_groups=2,
         embargo_ns=MINUTE,
         warmup_ns=warmup_ns,
+        cost_levels=cost_levels,
+        # Small, because a synthetic corpus has a handful of sessions and the
+        # bounds are not what these tests are about — the default 2,000 would
+        # multiply the suite's runtime for no extra assertion.
+        resamples=60,
     )
     return measurement, store
 
@@ -375,3 +381,129 @@ def test_warmup_bars_are_not_counted_as_read() -> None:
         GapContinuation, {AAPL: bars}, start=session.open_ns, warmup_ns=20 * 86_400_000_000_000
     )
     assert warm.runs[0].n_bars < len(bars)
+
+
+# ── The break-even cost curve ───────────────────────────────────────────
+
+
+def costs_at(scale: float) -> CostModel:
+    """The reference cost model with every scalable term multiplied.
+
+    Mirrors `cli._scaled_costs`; kept separate so a test cannot pass by agreeing
+    with the CLI about something they are both wrong about.
+    """
+    factor = Decimal(str(scale))
+    return CostModel(
+        spreads=FlooredSpread(
+            fraction=Decimal("0.0005") * factor, minimum=Decimal("0.01") * factor
+        ),
+        fees=FeeSchedule(per_share=Decimal("0.005") * factor, minimum=Decimal("1.00") * factor),
+    )
+
+
+def test_no_cost_levels_leaves_no_curve() -> None:
+    """The curve is opt-in: an existing measurement is unchanged by the feature."""
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(GapContinuation, series)
+    assert measurement.costs is None
+
+
+def test_the_curve_follows_the_winner_and_expectancy_falls_with_cost() -> None:
+    """The one property that makes a break-even number mean anything.
+
+    Costs are subtracted inside the label, so a dearer level cannot earn more on
+    the same trades. A sign error here would report a break-even cost above
+    every level measured and read as "this survives any cost".
+    """
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(
+        GapContinuation,
+        series,
+        cost_levels=[(scale, costs_at(scale)) for scale in (0.5, 1.0, 2.0, 4.0)],
+    )
+    curve = measurement.costs
+    evaluation = measurement.evaluation
+    assert curve is not None and evaluation is not None
+    assert curve.variant == evaluation.best_label
+    assert [point.scale for point in curve.points] == [0.5, 1.0, 2.0, 4.0]
+    expectancies = [point.expectancy for point in curve.points]
+    assert expectancies == sorted(expectancies, reverse=True)
+
+
+def test_a_cost_level_cannot_change_how_many_trades_were_taken() -> None:
+    """Barriers come off the `Intent`, so costs move what a touch was worth and nothing else.
+
+    This is what makes the curve nearly free — one engine pass, re-labelled — and
+    what keeps every level's column aligned with the reference's.
+    """
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(
+        GapContinuation, series, cost_levels=[(scale, costs_at(scale)) for scale in (1.0, 8.0)]
+    )
+    curve = measurement.costs
+    assert curve is not None
+    assert len({point.n_trades for point in curve.points}) == 1
+
+
+def test_levels_are_sorted_before_they_are_interpolated() -> None:
+    """`break_even` interpolates between adjacent points, so order cannot be the caller's."""
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(
+        GapContinuation, series, cost_levels=[(scale, costs_at(scale)) for scale in (4.0, 0.5, 1.0)]
+    )
+    curve = measurement.costs
+    assert curve is not None
+    assert [point.scale for point in curve.points] == [0.5, 1.0, 4.0]
+
+
+def test_a_curve_that_never_crosses_reports_no_break_even() -> None:
+    """`gap_continuation` is negative at every level, which is a finding, not a crossing."""
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(
+        GapContinuation, series, cost_levels=[(scale, costs_at(scale)) for scale in (0.5, 1.0)]
+    )
+    curve = measurement.costs
+    assert curve is not None
+    assert curve.points[0].expectancy < 0
+    assert curve.break_even is None
+    assert "negative at every level measured" in str(curve)
+
+
+# ── What the bootstrap and the corrections stamp on a measurement ───────
+
+
+def test_a_measurement_carries_a_bootstrapped_interval_and_its_own_dsr() -> None:
+    """The number that sits between `deflated` and `deflated_clustered`."""
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(GapContinuation, series)
+    bounds = measurement.interval
+    evaluation = measurement.evaluation
+    assert bounds is not None and evaluation is not None
+    assert bounds.observed == pytest.approx(evaluation.best_sharpe)
+    assert bounds.n_observations == evaluation.n_observations
+    assert bounds.n_clusters == measurement.n_sessions
+    assert measurement.deflated_bootstrapped is not None
+
+
+def test_the_haircut_corrects_against_this_sweeps_own_variants() -> None:
+    """Three declared band widths are three tests, and the report says so."""
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(GapContinuation, series)
+    report = measurement.haircut
+    evaluation = measurement.evaluation
+    assert report is not None and evaluation is not None
+    assert report.n_trials == evaluation.n_variants
+    assert report.observed == pytest.approx(evaluation.best_sharpe)
+
+
+def test_a_losing_strategy_gets_no_min_backtest_length() -> None:
+    """There is no performance for selection bias to have manufactured."""
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(GapContinuation, series)
+    evaluation = measurement.evaluation
+    assert evaluation is not None and evaluation.best_sharpe < 0
+    assert measurement.min_backtest_years is None
+    assert measurement.clears_min_backtest_length is None
+    # The span measured is still reported, so the comparison is available the
+    # moment a strategy earns a positive Sharpe.
+    assert measurement.sample_years is not None and measurement.sample_years > 0
