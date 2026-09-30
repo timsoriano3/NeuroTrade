@@ -44,6 +44,7 @@ from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from math import ceil
 
 from neurotrade.core.clock import Nanos, SimClock
 from neurotrade.core.costs import CostModel
@@ -55,6 +56,7 @@ from neurotrade.lab.cv import CombinatorialPurgedCV
 from neurotrade.lab.labelling import BarrierTouch, Label, triple_barrier
 from neurotrade.lab.significance import (
     OverfittingReport,
+    effective_n_trials,
     moments,
     probability_of_backtest_overfitting,
     sharpe_ratio,
@@ -205,6 +207,8 @@ class Evaluation:
     n_ambiguous: int  # trades where both barriers fell in one bar; the stop was assumed
     n_clusters: int | None = None  # independent groups the observations fall in; None if not given
     deflated_clustered: float | None = None  # DSR recomputed at `n_clusters`; always nearer 0.5
+    n_trials_effective: int | None = None  # independent looks the search was worth, <= n_variants
+    deflated_effective: float | None = None  # DSR at that count; never below `deflated`
 
     @property
     def positive_expectancy(self) -> bool:
@@ -252,6 +256,8 @@ class Evaluation:
             f"exp={self.expectancy:+.5f}/trade hit={self.hit_rate:.2f} "
             f"trials={self.n_variants} obs={self.n_observations} trades={self.n_trades}"
         )
+        if self.deflated_effective is not None and self.n_trials_effective is not None:
+            head = f"{head} dsr_eff={self.deflated_effective:.3f}@{self.n_trials_effective}looks"
         if self.deflated_clustered is None:
             return head
         return f"{head} dsr_clustered={self.deflated_clustered:.3f}"
@@ -693,6 +699,25 @@ def assess(
     # Removing sample-size credit pulls the confidence toward 0.5 in whichever
     # direction it sits, so this weakens a passing verdict and cannot rescue a
     # failing one — which is the property that makes it safe to report.
+    # The counterweight, and it runs the other way. This search's variants are
+    # correlated — nested bands on one rule move together — so charging each as an
+    # independent look sets the hurdle higher than the search earned. Only the
+    # current variants can be correlated: the ledger stores Sharpe ratios, not the
+    # paths behind them, so every earlier trial in the family keeps counting one
+    # look each. Ceiling, because rounding up is the side that deflates more.
+    looks = max(
+        1,
+        ceil(effective_n_trials(returns)) + ledger.count(family) - len(labels),
+    )
+    effective = ledger.deflate(
+        best_sharpe,
+        family=family,
+        n_observations=len(best_series),
+        skew=shape.skew,
+        kurtosis=shape.kurtosis,
+        n_trials_effective=looks,
+    )
+
     clustered: float | None = None
     if n_clusters is not None:
         if n_clusters < 2:
@@ -734,6 +759,8 @@ def assess(
         n_ambiguous=sum(touch.ambiguous for touch in taken),
         n_clusters=n_clusters,
         deflated_clustered=clustered,
+        n_trials_effective=looks,
+        deflated_effective=effective,
     )
 
 

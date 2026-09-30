@@ -30,6 +30,9 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import date
+from decimal import Decimal
+from statistics import fmean
 from typing import Final
 
 from neurotrade.core.clock import Nanos, SimClock, to_datetime
@@ -54,6 +57,13 @@ from neurotrade.lab.evaluation import (
 )
 from neurotrade.lab.feed import CorpusFeed
 from neurotrade.lab.labelling import BarrierTouch
+from neurotrade.lab.regimes import (
+    RegimeCoverage,
+    VolatilityBucket,
+    bucket_sessions,
+    coverage_of,
+    trailing_volatility,
+)
 from neurotrade.lab.trials import TrialLedger
 from neurotrade.strategies.base import Strategy
 from neurotrade.strategies.context import MarketContext
@@ -125,6 +135,7 @@ class Measurement:
     digest: str  # over every variant run's own digest: behaviour, not results
     evaluation: Evaluation | None  # None when the sample could not support one
     reason: str  # why there is no evaluation; empty when there is one
+    regimes: RegimeCoverage | None = None  # per-volatility-bucket expectancy of the winner
 
     @property
     def is_measured(self) -> bool:
@@ -189,7 +200,8 @@ class Measurement:
         if self.evaluation is None:
             return f"{head}  NOT MEASURED — {self.reason}"
         gated = "gated" if self.regime_gated else "ungated"
-        return f"{head}  {self.evaluation}  sessions={self.n_sessions} {gated}"
+        tail = f"{head}  {self.evaluation}  sessions={self.n_sessions} {gated}"
+        return tail if self.regimes is None else f"{tail}\n           {self.regimes}"
 
 
 def measure_strategy(
@@ -288,8 +300,28 @@ def measure_strategy(
 
     parts: list[Part] = []
     runs: list[SymbolRun] = []
+    session_ranges: dict[date, list[float]] = {}
     for symbol in ordered:
         bars = list(store.read_bars(symbol, interval, start, end))
+        # A session's high-low range over its close: the volatility proxy the
+        # regime buckets are cut from. Accumulated market-wide, because a
+        # volatility regime is a property of the market and pooling discards
+        # the symbol anyway. Derived statistic, so float is correct here.
+        extremes: dict[date, tuple[Decimal, Decimal, Decimal]] = {}
+        for one in bars:
+            session = to_datetime(one.ts_event).date()
+            held = extremes.get(session)
+            if held is None:
+                extremes[session] = (one.low.value, one.high.value, one.close.value)
+            else:
+                extremes[session] = (
+                    min(held[0], one.low.value),
+                    max(held[1], one.high.value),
+                    one.close.value,
+                )
+        for session, (low, high, close) in extremes.items():
+            if close > 0:
+                session_ranges.setdefault(session, []).append(float((high - low) / close))
         if not bars:
             runs.append(
                 SymbolRun(
@@ -361,6 +393,14 @@ def measure_strategy(
 
     pooled = pool(parts)
     sessions = len({to_datetime(opened).date() for opened, _ in pooled.spans})
+    # Trailing volatility reads only prior sessions, so the measure itself is
+    # live-safe; the tercile boundaries are full-sample, which is right for
+    # describing a finished run and wrong for a live gate. See lab/regimes.py.
+    readings = trailing_volatility({s: fmean(v) for s, v in session_ranges.items()})
+    by_session = bucket_sessions(readings) if readings else {}
+    observation_buckets: tuple[VolatilityBucket | None, ...] = tuple(
+        by_session.get(to_datetime(opened).date()) for opened, _ in pooled.spans
+    )
     shell = Measurement(
         strategy=strategy.name,
         version=strategy.version,
@@ -399,7 +439,14 @@ def measure_strategy(
         # verdict carries a second deflation charged at that count.
         n_clusters=sessions if sessions >= 2 else None,
     )
-    return replace(shell, evaluation=evaluation)
+    coverage = coverage_of(
+        observation_buckets,
+        tuple(
+            None if touch is None else float(touch.realised_return)
+            for touch in pooled.trades[evaluation.best_index]
+        ),
+    )
+    return replace(shell, evaluation=evaluation, regimes=coverage)
 
 
 def _expectancy(column: Sequence[BarrierTouch | None]) -> tuple[int, float]:

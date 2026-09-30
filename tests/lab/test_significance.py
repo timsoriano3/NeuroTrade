@@ -18,6 +18,7 @@ from neurotrade.lab.significance import (
     OverfittingReport,
     annualized,
     deflated_sharpe_ratio,
+    effective_n_trials,
     expected_max_sharpe,
     moments,
     probabilistic_sharpe_ratio,
@@ -284,3 +285,100 @@ def test_pbo_is_deterministic_across_repeated_calls() -> None:
     first = probability_of_backtest_overfitting(rows, n_blocks=6)
     second = probability_of_backtest_overfitting(rows, n_blocks=6)
     assert first == second
+
+
+# ── Effective number of trials ──────────────────────────────────────────
+
+A_SERIES = [0.01, -0.02, 0.03, -0.01, 0.02, 0.00, -0.03, 0.01]
+NEAR_COPY = [0.011, -0.019, 0.031, -0.009, 0.021, 0.001, -0.029, 0.011]
+OPPOSED = [-0.01, 0.02, -0.03, 0.01, -0.02, 0.00, 0.03, -0.01]
+
+
+def test_one_trial_is_one_look() -> None:
+    """No pair to correlate, so there is nothing to collapse."""
+    assert effective_n_trials([A_SERIES]) == 1.0
+
+
+def test_duplicated_trials_collapse_to_a_single_look() -> None:
+    """Nested bands on one rule are the case this exists for."""
+    assert round(effective_n_trials([A_SERIES, NEAR_COPY]), 4) == 1.0
+    assert round(effective_n_trials([A_SERIES, NEAR_COPY, A_SERIES]), 4) == 1.0
+
+
+def test_anticorrelated_trials_are_never_more_than_their_count() -> None:
+    """The clamp: opposed trials are not worth extra looks."""
+    assert effective_n_trials([A_SERIES, OPPOSED]) == 2.0
+
+
+def test_the_effective_count_never_exceeds_the_trials_run() -> None:
+    """Whatever the correlations, the answer stays in [1, N]."""
+    for series in ([A_SERIES, NEAR_COPY], [A_SERIES, OPPOSED], [A_SERIES, NEAR_COPY, OPPOSED]):
+        assert 1.0 <= effective_n_trials(series) <= len(series)
+
+
+def test_no_series_at_all_is_refused() -> None:
+    """A search of nothing has no effective size."""
+    with pytest.raises(ValueError, match="at least one series"):
+        effective_n_trials([])
+
+
+def test_series_of_different_lengths_are_refused() -> None:
+    """Correlating misaligned samples silently answers a different question."""
+    with pytest.raises(ValueError, match=r"series lengths differ: \[4, 8\]"):
+        effective_n_trials([A_SERIES, A_SERIES[:4]])
+
+
+def test_a_constant_series_is_scored_as_uncorrelated_not_as_an_error() -> None:
+    """`statistics.correlation` raises on zero variance; the conservative read wins."""
+    flat = [0.0] * len(A_SERIES)
+    assert effective_n_trials([A_SERIES, flat]) == 2.0
+
+
+# ── Deflating at an effective count ─────────────────────────────────────
+
+
+def trial_spread() -> list[float]:
+    """A search of 201 whose winner posted 0.1."""
+    return [0.1] + [0.001 * i - 0.1 for i in range(200)]
+
+
+def test_fewer_effective_looks_is_a_lower_hurdle_and_more_confidence() -> None:
+    """Correlated trials should not be charged as independent searches."""
+    trials = trial_spread()
+    full = deflated_sharpe_ratio(0.1, trial_sharpes=trials, n_observations=250)
+    collapsed = deflated_sharpe_ratio(
+        0.1, trial_sharpes=trials, n_observations=250, n_trials_effective=3
+    )
+    assert collapsed > full
+
+
+def test_an_effective_count_equal_to_the_trials_changes_nothing() -> None:
+    """The override is the identity when the search really was independent."""
+    trials = trial_spread()
+    assert deflated_sharpe_ratio(
+        0.1, trial_sharpes=trials, n_observations=250, n_trials_effective=len(trials)
+    ) == deflated_sharpe_ratio(0.1, trial_sharpes=trials, n_observations=250)
+
+
+@pytest.mark.parametrize("looks", [0, -1, 202, 1_000])
+def test_an_effective_count_outside_the_search_is_refused(looks: int) -> None:
+    """More looks than trials run, or fewer than one, is a caller bug."""
+    with pytest.raises(ValueError, match=r"must be between 1 and 201"):
+        deflated_sharpe_ratio(
+            0.1, trial_sharpes=trial_spread(), n_observations=250, n_trials_effective=looks
+        )
+
+
+def test_clustering_raises_a_verdict_that_was_already_failing() -> None:
+    """Below 0.5, removing sample-size credit moves confidence *up* toward 0.5.
+
+    Pins the case that falsified an earlier assumption that the clustered figure
+    is always the lower one: `gap_continuation` measured dsr=0.017 clustered to
+    0.056. The invariant is distance from 0.5, never direction.
+    """
+    trials = trial_spread()
+    poor = -0.05  # a loser, so its DSR sits far below a coin flip
+    full = deflated_sharpe_ratio(poor, trial_sharpes=trials, n_observations=4_000)
+    clustered = deflated_sharpe_ratio(poor, trial_sharpes=trials, n_observations=600)
+    assert full < clustered < 0.5
+    assert abs(clustered - 0.5) < abs(full - 0.5)

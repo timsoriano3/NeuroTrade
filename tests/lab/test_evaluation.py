@@ -638,3 +638,45 @@ def test_the_clustered_number_is_printed_when_it_exists() -> None:
     evaluation = assess_pair(12)
     assert evaluation.deflated_clustered is not None
     assert f"dsr_clustered={evaluation.deflated_clustered:.3f}" in str(evaluation)
+
+
+# ── Effective-trial deflation ───────────────────────────────────────────
+
+
+def test_a_verdict_always_reports_what_its_search_was_really_worth() -> None:
+    """No caller input is needed, so unlike clustering this is never absent."""
+    evaluation = assess_pair(None)
+    assert evaluation.n_trials_effective is not None
+    assert evaluation.deflated_effective is not None
+    assert 1 <= evaluation.n_trials_effective <= evaluation.n_variants
+
+
+def test_collapsing_correlated_looks_can_only_help_the_verdict() -> None:
+    """Fewer independent looks is a lower hurdle, so confidence cannot fall."""
+    evaluation = assess_pair(None)
+    assert evaluation.deflated_effective is not None
+    assert evaluation.deflated_effective >= evaluation.deflated
+
+
+def test_the_two_corrections_move_in_opposite_directions() -> None:
+    """Clustering pulls toward 0.5; collapsing correlated looks can only raise.
+
+    **They do not bracket `deflated`, and assuming they did was a real bug here.**
+    For a verdict already below 0.5 clustering raises it too — `gap_continuation`
+    measured dsr=0.017 with dsr_clustered=0.056 — so the only universal statements
+    are the two asserted below. The pair is still reported together on purpose:
+    shipping only the favourable one is the bias the lab exists to remove.
+    """
+    evaluation = assess_pair(12)
+    assert evaluation.deflated_clustered is not None
+    assert evaluation.deflated_effective is not None
+    assert abs(evaluation.deflated_clustered - 0.5) <= abs(evaluation.deflated - 0.5)
+    assert evaluation.deflated_effective >= evaluation.deflated
+
+
+def test_both_corrections_are_printed() -> None:
+    """A reader must see the bracket, not just the middle."""
+    printed = str(assess_pair(12))
+    assert "dsr_eff=" in printed
+    assert "looks" in printed
+    assert "dsr_clustered=" in printed

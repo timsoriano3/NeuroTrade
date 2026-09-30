@@ -208,6 +208,7 @@ class TrialLedger:
         n_observations: int,
         skew: float = 0.0,
         kurtosis: float = 3.0,
+        n_trials_effective: int | None = None,
     ) -> float:
         """Deflated Sharpe ratio for a candidate, against its family's history.
 
@@ -221,13 +222,18 @@ class TrialLedger:
             n_observations: Returns the candidate's Sharpe was computed from.
             skew: Third standardized moment of the candidate's returns.
             kurtosis: Fourth standardized moment, not excess.
+            n_trials_effective: Independent looks the family's trials are worth
+                when they are correlated; see `effective_n_trials`. The caller
+                supplies it because only the caller holds the return series —
+                the ledger stores Sharpe ratios, not the paths behind them.
 
         Returns:
             Confidence in `(0, 1)` that the candidate beats the best its own
             search would have produced from noise.
 
         Raises:
-            ValueError: If the family holds no trials.
+            ValueError: If the family holds no trials, or `n_trials_effective`
+                exceeds how many it holds.
         """
         values = self.sharpes(family)
         if not values:
@@ -238,4 +244,5 @@ class TrialLedger:
             n_observations=n_observations,
             skew=skew,
             kurtosis=kurtosis,
+            n_trials_effective=n_trials_effective,
         )

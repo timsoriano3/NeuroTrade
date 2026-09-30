@@ -41,7 +41,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import combinations
-from statistics import NormalDist
+from statistics import NormalDist, StatisticsError, correlation
 from typing import Final
 
 __all__ = [
@@ -49,6 +49,7 @@ __all__ = [
     "OverfittingReport",
     "annualized",
     "deflated_sharpe_ratio",
+    "effective_n_trials",
     "expected_max_sharpe",
     "moments",
     "probabilistic_sharpe_ratio",
@@ -266,6 +267,83 @@ def expected_max_sharpe(*, n_trials: int, trial_variance: float) -> float:
     return math.sqrt(trial_variance) * ((1.0 - gamma) * first + gamma * second)
 
 
+def effective_n_trials(series: Sequence[Sequence[float]]) -> float:
+    """How many *independent* looks a set of correlated trials is worth.
+
+    `expected_max_sharpe` assumes every trial is an independent draw. A sweep
+    rarely is: nested bands on one rule produce return series that move together,
+    so counting them as separate looks sets the hurdle higher than the search
+    earned. This is the first-order correction — `N / (1 + (N-1) * mean_corr)`,
+    the standard effective-number-of-tests form — driven by the mean pairwise
+    Pearson correlation of the trials' return series.
+
+    A negative mean correlation is clamped to zero, so the answer never exceeds
+    the trial count: anti-correlated trials are not *more* than independent looks
+    for this purpose, and letting them inflate the count would deflate less than
+    a genuinely independent search would.
+
+    **A mean cannot see structure, and this is its blind spot.** Two duplicates
+    plus one anti-correlated trial average to roughly zero, the clamp returns the
+    full count, and three trials worth two looks are charged as three. That errs
+    toward deflating more than necessary, so it is safe — but it is exactly what
+    clustering the matrix would catch. López de Prado & Lewis (*Quantitative
+    Finance* 19(9), 2019) do that (ONC); it needs a stored return series per
+    trial, and the ledger keeps only Sharpe ratios, so ONC is the refinement this
+    leaves room for rather than the thing implemented.
+
+    Args:
+        series: One return series per trial, all the same length, aligned on the
+            same observations.
+
+    Returns:
+        A count in `[1, len(series)]`. Exactly `len(series)` when the trials are
+        uncorrelated, and near 1 when they are near-identical.
+
+    Raises:
+        ValueError: If fewer than one series is given, or the series differ in
+            length — correlations across misaligned samples are meaningless.
+
+    Example:
+        Two variants that agree on every observation are one look:
+
+        >>> a = [0.01, -0.02, 0.03, -0.01, 0.02, 0.00, -0.03, 0.01]
+        >>> b = [0.011, -0.019, 0.031, -0.009, 0.021, 0.001, -0.029, 0.011]
+        >>> round(effective_n_trials([a, b]), 4)
+        1.0
+
+        Partial agreement lands in between:
+
+        >>> m = [0.01, -0.02, 0.03, 0.01, -0.02, 0.00, -0.03, 0.02]
+        >>> round(effective_n_trials([a, m]), 4)
+        1.2063
+
+        Anti-correlation is clamped, never credited as extra looks:
+
+        >>> u = [0.02, 0.01, -0.01, 0.03, -0.02, -0.03, 0.01, 0.00]
+        >>> round(effective_n_trials([a, u]), 4)
+        2.0
+    """
+    n_trials = len(series)
+    if n_trials < 1:
+        raise ValueError("effective_n_trials needs at least one series")
+    lengths = {len(one) for one in series}
+    if len(lengths) > 1:
+        raise ValueError(f"series lengths differ: {sorted(lengths)}")
+    if n_trials == 1:
+        return 1.0
+    pairs = []
+    for left, right in combinations(series, 2):
+        try:
+            pairs.append(correlation(left, right))
+        except StatisticsError:
+            # A constant series has no correlation with anything. Scoring the
+            # pair as uncorrelated keeps the effective count high, which is the
+            # conservative side: it deflates more, not less.
+            pairs.append(0.0)
+    mean_corr = max(math.fsum(pairs) / len(pairs), 0.0)
+    return n_trials / (1.0 + (n_trials - 1) * mean_corr)
+
+
 def deflated_sharpe_ratio(
     observed: float,
     *,
@@ -273,6 +351,7 @@ def deflated_sharpe_ratio(
     n_observations: int,
     skew: float = 0.0,
     kurtosis: float = 3.0,
+    n_trials_effective: int | None = None,
 ) -> float:
     """Confidence that a result survives the search that produced it.
 
@@ -290,12 +369,18 @@ def deflated_sharpe_ratio(
         n_observations: Returns the candidate's Sharpe was computed from.
         skew: Third standardized moment of the candidate's returns.
         kurtosis: Fourth standardized moment, not excess.
+        n_trials_effective: Independent looks the search was really worth, from
+            `effective_n_trials`, when the trials are correlated. Replaces the
+            count in the expected maximum **only** — the spread still comes from
+            every trial, because correlated trials add no look but do describe
+            how wide the space was. Omit it to count every trial as its own look.
 
     Returns:
         A probability in `(0, 1)`.
 
     Raises:
-        ValueError: If `trial_sharpes` is empty, or `n_observations` is below 2.
+        ValueError: If `trial_sharpes` is empty, `n_observations` is below 2, or
+            `n_trials_effective` falls outside `[1, len(trial_sharpes)]`.
 
     Example:
         A Sharpe of 0.1 per day over a year looks strong on its own:
@@ -312,13 +397,24 @@ def deflated_sharpe_ratio(
     """
     if not trial_sharpes:
         raise ValueError("deflation needs at least one trial; see lab/trials.py")
+    if n_trials_effective is not None and not 1 <= n_trials_effective <= len(trial_sharpes):
+        raise ValueError(
+            f"n_trials_effective {n_trials_effective} must be between 1 and "
+            f"{len(trial_sharpes)}, the trials actually run"
+        )
     n_trials = len(trial_sharpes)
     if n_trials == 1:
         trial_variance = 0.0
     else:
         mean = math.fsum(trial_sharpes) / n_trials
         trial_variance = math.fsum((value - mean) ** 2 for value in trial_sharpes) / (n_trials - 1)
-    benchmark = expected_max_sharpe(n_trials=n_trials, trial_variance=trial_variance)
+    # The *spread* of the search is measured from every trial even when the count
+    # is reduced: correlated trials add no independent look, but they do say how
+    # wide the space searched was, which is the other half of the hurdle.
+    benchmark = expected_max_sharpe(
+        n_trials=n_trials if n_trials_effective is None else n_trials_effective,
+        trial_variance=trial_variance,
+    )
     return probabilistic_sharpe_ratio(
         observed,
         benchmark=benchmark,

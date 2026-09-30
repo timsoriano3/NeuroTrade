@@ -18,6 +18,7 @@ difference.
 | `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
 | `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV |
+| `regimes.py` | Which volatility regimes a result earned in: trailing session volatility, terciles, per-bucket expectancy (§15) |
 | `trials.py` | The ledger the deflation counts against — every hypothesis tested, by anything |
 | `evaluation.py` | Decisions in, a deflated verdict out: labels, the ledger, CPCV paths, PBO, expectancy |
 | `measure.py` | Runs a registered strategy over the corpus, pools the instruments, and reports the verdict |
