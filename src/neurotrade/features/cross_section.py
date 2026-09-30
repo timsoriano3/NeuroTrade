@@ -46,7 +46,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
 
 from neurotrade.core.clock import Nanos
 from neurotrade.core.types import Price, Symbol
@@ -55,10 +55,28 @@ from neurotrade.features.levels import SessionLevels
 __all__ = [
     "BETA_MEMORY",
     "DEFAULT_TRAILING_MINUTES",
+    "BenchmarkSource",
     "CrossSection",
     "CrossSectionTracker",
     "InstrumentSnapshot",
 ]
+
+
+@runtime_checkable
+class BenchmarkSource(Protocol):
+    """Says what an instrument's return should be regressed on, on a session.
+
+    A Protocol rather than a `Mapping`, because the answer is **point in time**:
+    GICS moved the payment networks between sectors part way through the seed
+    window, and a flat dictionary would have to be resolved as of some single
+    date — as of the run's end, which is lookahead, or as of its start, which is
+    stale by years. `core.sectors.SectorMap` satisfies this structurally.
+    """
+
+    def benchmark_of(self, symbol: Symbol, *, on: date) -> Symbol | None:
+        """The benchmark, or `None` for an instrument that has none."""
+        ...
+
 
 BETA_MEMORY: Final = 60
 """Completed sessions a beta is estimated over.
@@ -264,12 +282,13 @@ class CrossSectionTracker:
     beta against a benchmark.
 
     Example:
-        >>> tracker = CrossSectionTracker(benchmarks={})
+        >>> tracker = CrossSectionTracker()
         >>> tracker.snapshot() is None          # nothing has closed yet
         True
     """
 
     __slots__ = (
+        "_benchmark",
         "_benchmarks",
         "_closed",
         "_pending",
@@ -283,15 +302,16 @@ class CrossSectionTracker:
     def __init__(
         self,
         *,
-        benchmarks: Mapping[Symbol, Symbol],
+        benchmarks: BenchmarkSource | None = None,
         trailing_minutes: int = DEFAULT_TRAILING_MINUTES,
     ) -> None:
-        """Wire the tracker to the benchmark each instrument regresses on.
+        """Wire the tracker to whatever says what an instrument regresses on.
 
         Args:
-            benchmarks: Instrument to the symbol its beta is measured against —
-                its sector proxy, or its venue's market leg. An instrument
-                absent from this gets no beta rather than a default of one.
+            benchmarks: Resolves an instrument's benchmark for a session — a
+                `core.sectors.SectorMap`, normally. `None` means nothing has a
+                benchmark, so nothing has a beta or a residual, which is the
+                state a run of single-instrument strategies is in.
             trailing_minutes: Window for `trailing_return`, in minutes of
                 session.
 
@@ -300,7 +320,7 @@ class CrossSectionTracker:
         """
         if trailing_minutes < 1:
             raise ValueError(f"trailing_minutes {trailing_minutes} must be at least 1")
-        self._benchmarks = dict(benchmarks)
+        self._benchmarks = benchmarks
         self._trailing_minutes = trailing_minutes
         self._tick: Nanos | None = None
         self._pending: dict[Symbol, InstrumentSnapshot] = {}
@@ -309,6 +329,10 @@ class CrossSectionTracker:
         # session, and one observation per completed session for the beta.
         self._sessions: dict[Symbol, date] = {}
         self._trailing: dict[Symbol, dict[int, float]] = {}
+        # The benchmark each instrument resolved to, at the session it last
+        # printed in. Cached rather than re-resolved in `_beta` and
+        # `_residual_of`, so both read the same answer for one tick.
+        self._benchmark: dict[Symbol, Symbol | None] = {}
         # Keyed by session **date**, not appended to a list. Within one tick an
         # instrument may have rolled into the new session while its benchmark
         # has not — they are dispatched in symbol order — so two lists of
@@ -345,6 +369,15 @@ class CrossSectionTracker:
         minute = int((ts - levels.open_ns) // _NANOS_PER_MINUTE)
         session_return = _fraction(levels.close, levels.session_open)
         self._trailing.setdefault(symbol, {})[minute] = session_return
+        # Resolved for *this* session, so a reclassification is respected. The
+        # beta is then this instrument's beta to the sector it is in **now**,
+        # estimated on the sessions the two share — which is the right quantity:
+        # what V's return will do against XLF, not what it did against XLK.
+        self._benchmark[symbol] = (
+            None
+            if self._benchmarks is None
+            else self._benchmarks.benchmark_of(symbol, on=levels.session_date)
+        )
         self._pending[symbol] = InstrumentSnapshot(
             symbol=symbol,
             session_return=session_return,
@@ -390,7 +423,7 @@ class CrossSectionTracker:
         that has not printed yet this run — never the raw return, which in a
         column of residuals sits at an extreme on any day the market moved.
         """
-        benchmark = self._benchmarks.get(symbol)
+        benchmark = self._benchmark.get(symbol)
         if benchmark is None:
             return None
         reference = self._pending.get(benchmark)
@@ -460,7 +493,7 @@ class CrossSectionTracker:
             ranking, which is the safe direction — a default of one would assume
             the answer for exactly the names whose answer is missing.
         """
-        benchmark = self._benchmarks.get(symbol)
+        benchmark = self._benchmark.get(symbol)
         if benchmark is None:
             return None
         own = self._returns.get(symbol, {})

@@ -9,7 +9,7 @@ rather than built from stale history.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import ClassVar
 
 import pytest
@@ -23,6 +23,7 @@ from neurotrade.strategies.base import FeatureRef, Regime, Strategy
 from neurotrade.strategies.context import (
     LULL_ENDS_AFTER_OPEN_NS,
     LULL_STARTS_AFTER_OPEN_NS,
+    NEXT_SESSION_SEARCH_DAYS,
     MarketContext,
     market_phase,
     time_of_day_regime,
@@ -370,6 +371,17 @@ def priced(symbol: Symbol, ts: Nanos, close: str) -> Bar:
     )
 
 
+def session_on(day: date) -> TradingSession:
+    """A full regular session on one date, for the next-open lookups."""
+    return TradingSession(
+        venue=Venue.NASDAQ,
+        session_date=day,
+        open_ns=to_nanos(datetime(day.year, day.month, day.day, 13, 30, tzinfo=UTC)),
+        close_ns=to_nanos(datetime(day.year, day.month, day.day, 20, 0, tzinfo=UTC)),
+        is_early_close=False,
+    )
+
+
 def test_no_cross_section_is_built_when_nothing_asks_for_one() -> None:
     """What keeps every measurement taken before this existed byte-identical."""
     context = context_over(FULL_DAY)
@@ -426,3 +438,54 @@ def test_the_repr_says_whether_a_cross_section_is_being_built() -> None:
     watching.declare(Watcher())
     assert "cross-section" not in repr(plain)
     assert "cross-section" in repr(watching)
+
+
+# ── The next session's open ──────────────────────────────────────────────
+
+
+def test_the_next_open_comes_from_the_calendar_not_from_a_fixed_span() -> None:
+    """The overnight family's exit. A fixed 17.5 hours lands on a Saturday one
+    night in five, where the labeller finds no bars at all."""
+    tomorrow = session_on(date(2024, 7, 9))
+    context = context_over(FULL_DAY, tomorrow)
+    context.declare(Loner())
+    bar = priced(AAPL, utc(14, 0), "100")
+    context.observe(bar)
+    levels = context(bar, Loner()).levels
+    assert levels is not None
+    assert levels.next_open_ns == tomorrow.open_ns
+
+
+def test_a_holiday_weekend_is_skipped_rather_than_stepped() -> None:
+    """The calendar is asked for trading days, so a four-day gap costs one lookup."""
+    after = session_on(date(2024, 7, 15))
+    context = context_over(FULL_DAY, after)
+    context.declare(Loner())
+    bar = priced(AAPL, utc(14, 0), "100")
+    context.observe(bar)
+    levels = context(bar, Loner()).levels
+    assert levels is not None
+    assert levels.next_open_ns == after.open_ns
+
+
+def test_no_later_session_leaves_the_next_open_unset() -> None:
+    """The end of the calendar, which an overnight strategy declines on."""
+    context = context_over(FULL_DAY)
+    context.declare(Loner())
+    bar = priced(AAPL, utc(14, 0), "100")
+    context.observe(bar)
+    levels = context(bar, Loner()).levels
+    assert levels is not None
+    assert levels.next_open_ns is None
+
+
+def test_a_session_beyond_the_search_horizon_is_not_found() -> None:
+    """Bounded, so a venue whose schedule has ended is not walked indefinitely."""
+    far = session_on(date(2024, 7, 8) + timedelta(days=NEXT_SESSION_SEARCH_DAYS + 1))
+    context = context_over(FULL_DAY, far)
+    context.declare(Loner())
+    bar = priced(AAPL, utc(14, 0), "100")
+    context.observe(bar)
+    levels = context(bar, Loner()).levels
+    assert levels is not None
+    assert levels.next_open_ns is None

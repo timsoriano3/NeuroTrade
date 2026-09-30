@@ -23,6 +23,24 @@ from neurotrade.features.cross_section import (
 )
 from neurotrade.features.levels import SessionLevels
 
+
+class Fixed:
+    """A `BenchmarkSource` that ignores the date.
+
+    The real one is `core.sectors.SectorMap`, which is point-in-time; these
+    tests are about the tracker's arithmetic and not about reclassification, so
+    a flat answer keeps them reading as one idea. `test_sectors.py` is where the
+    dated behaviour is pinned.
+    """
+
+    def __init__(self, pairs: dict[Symbol, Symbol]) -> None:
+        self._pairs = pairs
+
+    def benchmark_of(self, symbol: Symbol, *, on: date) -> Symbol | None:
+        del on
+        return self._pairs.get(symbol)
+
+
 AAPL = Symbol("AAPL", Venue.NASDAQ)
 MSFT = Symbol("MSFT", Venue.NASDAQ)
 SPY = Symbol("SPY", Venue.ARCA)
@@ -62,14 +80,14 @@ def levels(
 
 
 def test_nothing_is_visible_until_a_tick_has_closed() -> None:
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="101"), AAPL, 0)
     assert tracker.snapshot() is None
 
 
 def test_a_tick_closes_only_when_the_clock_moves_past_it() -> None:
     """Both instruments' bars at one tick land in the same snapshot, and only after."""
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="101"), AAPL, MINUTE)
     tracker.observe(levels(close="102"), MSFT, MINUTE)
     assert tracker.snapshot() is None
@@ -87,7 +105,7 @@ def test_the_snapshot_never_carries_the_tick_being_assembled() -> None:
     names' bars before they were published — every bar, for every symbol but
     the last.
     """
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     for minute in range(1, 5):
         tracker.observe(levels(close="101", minute=minute), AAPL, minute * MINUTE)
         section = tracker.snapshot()
@@ -101,7 +119,7 @@ def test_an_instrument_that_did_not_print_is_stale_not_absent() -> None:
     That is a selection effect on exactly the names a stocks-in-play filter is
     supposed to find.
     """
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="101"), AAPL, MINUTE)
     tracker.observe(levels(close="102"), MSFT, MINUTE)
     tracker.observe(levels(close="103", minute=2), AAPL, 2 * MINUTE)
@@ -112,7 +130,7 @@ def test_an_instrument_that_did_not_print_is_stale_not_absent() -> None:
 
 
 def test_time_going_backwards_is_a_wiring_bug_not_a_recoverable_state() -> None:
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="101", minute=2), AAPL, 2 * MINUTE)
     with pytest.raises(ValueError, match="cross-section went backwards"):
         tracker.observe(levels(close="101"), AAPL, MINUTE)
@@ -122,7 +140,7 @@ def test_time_going_backwards_is_a_wiring_bug_not_a_recoverable_state() -> None:
 
 
 def test_the_session_return_is_the_close_over_the_open() -> None:
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="102", open_="100"), AAPL, MINUTE)
     tracker.observe(levels(close="102", open_="100", minute=2), AAPL, 2 * MINUTE)
     section = tracker.snapshot()
@@ -132,7 +150,7 @@ def test_the_session_return_is_the_close_over_the_open() -> None:
 
 def test_a_trailing_return_is_measured_on_the_session_clock() -> None:
     """Between two points of the session-return profile, keyed by minute."""
-    tracker = CrossSectionTracker(benchmarks={}, trailing_minutes=2)
+    tracker = CrossSectionTracker(trailing_minutes=2)
     for minute, close in enumerate(("100", "101", "102", "103")):
         tracker.observe(levels(close=close, minute=minute), AAPL, minute * MINUTE)
     tracker.observe(levels(close="103", minute=4), AAPL, 4 * MINUTE)
@@ -144,7 +162,7 @@ def test_a_trailing_return_is_measured_on_the_session_clock() -> None:
 
 def test_a_missing_print_leaves_the_trailing_return_none_not_longer() -> None:
     """An instrument with a gap must not be ranked over a longer look than its neighbours."""
-    tracker = CrossSectionTracker(benchmarks={}, trailing_minutes=2)
+    tracker = CrossSectionTracker(trailing_minutes=2)
     tracker.observe(levels(close="100", minute=0), AAPL, 0)
     # Minute 1 never prints, so minute 3's two-minute look has no base.
     tracker.observe(levels(close="102", minute=3), AAPL, 3 * MINUTE)
@@ -155,7 +173,7 @@ def test_a_missing_print_leaves_the_trailing_return_none_not_longer() -> None:
 
 
 def test_the_window_cannot_reach_before_the_session_open() -> None:
-    tracker = CrossSectionTracker(benchmarks={}, trailing_minutes=30)
+    tracker = CrossSectionTracker(trailing_minutes=30)
     tracker.observe(levels(close="101", minute=1), AAPL, MINUTE)
     tracker.observe(levels(close="101", minute=2), AAPL, 2 * MINUTE)
     section = tracker.snapshot()
@@ -165,7 +183,7 @@ def test_the_window_cannot_reach_before_the_session_open() -> None:
 
 def test_relative_volume_is_taken_from_the_levels_not_recomputed() -> None:
     """One implementation of a session's volume profile, in `features/levels.py`."""
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="101", rvol=2.5), AAPL, MINUTE)
     tracker.observe(levels(close="101", minute=2, rvol=2.5), AAPL, 2 * MINUTE)
     section = tracker.snapshot()
@@ -175,7 +193,7 @@ def test_relative_volume_is_taken_from_the_levels_not_recomputed() -> None:
 
 def test_a_positive_trailing_minutes_is_required() -> None:
     with pytest.raises(ValueError, match="trailing_minutes 0 must be at least 1"):
-        CrossSectionTracker(benchmarks={}, trailing_minutes=0)
+        CrossSectionTracker(trailing_minutes=0)
 
 
 # ── Beta ────────────────────────────────────────────────────────────────
@@ -195,7 +213,7 @@ def run_sessions(tracker: CrossSectionTracker, moves: list[tuple[float, float]])
 
 def test_no_benchmark_means_no_beta_rather_than_a_default_of_one() -> None:
     """Assuming one is assuming the answer for the names whose answer is missing."""
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     run_sessions(tracker, [(0.01, 0.01)] * (BETA_MEMORY + 2))
     section = tracker.snapshot()
     assert section is not None
@@ -203,7 +221,7 @@ def test_no_benchmark_means_no_beta_rather_than_a_default_of_one() -> None:
 
 
 def test_a_short_history_has_no_beta() -> None:
-    tracker = CrossSectionTracker(benchmarks={AAPL: SPY})
+    tracker = CrossSectionTracker(benchmarks=Fixed({AAPL: SPY}))
     run_sessions(tracker, [(0.01, 0.01), (-0.02, -0.01)] * 5)
     section = tracker.snapshot()
     assert section is not None
@@ -211,7 +229,7 @@ def test_a_short_history_has_no_beta() -> None:
 
 
 def test_a_beta_of_two_is_recovered_from_sessions_that_move_twice_as_far() -> None:
-    tracker = CrossSectionTracker(benchmarks={AAPL: SPY})
+    tracker = CrossSectionTracker(benchmarks=Fixed({AAPL: SPY}))
     moves = [(0.02 * step, 0.01 * step) for step in (1, -1, 2, -2, 1, -3)]
     run_sessions(tracker, moves * (BETA_MEMORY // len(moves) + 2))
     section = tracker.snapshot()
@@ -220,7 +238,7 @@ def test_a_beta_of_two_is_recovered_from_sessions_that_move_twice_as_far() -> No
 
 
 def test_a_benchmark_that_never_moved_has_no_slope() -> None:
-    tracker = CrossSectionTracker(benchmarks={AAPL: SPY})
+    tracker = CrossSectionTracker(benchmarks=Fixed({AAPL: SPY}))
     moves = [(0.02 * step, 0.0) for step in (1, -1, 2, -2)]
     run_sessions(tracker, moves * (BETA_MEMORY // len(moves) + 2))
     section = tracker.snapshot()
@@ -251,7 +269,7 @@ def test_every_row_is_residualised_against_the_same_benchmark_tick() -> None:
     Per bar, the names dispatched before the benchmark would use its previous
     tick and the rest this one — a ranking whose column is measured two ways.
     """
-    tracker = CrossSectionTracker(benchmarks={AAPL: SPY, MSFT: SPY})
+    tracker = CrossSectionTracker(benchmarks=Fixed({AAPL: SPY, MSFT: SPY}))
     moves = [(0.02 * step, 0.01 * step, 0.03 * step) for step in (1, -1, 2, -2)]
     for index, (own, market, other) in enumerate(moves * (BETA_MEMORY // 4 + 2)):
         day = date(2024, 1, 1) + timedelta(days=index)
@@ -271,7 +289,7 @@ def test_every_row_is_residualised_against_the_same_benchmark_tick() -> None:
 
 
 def test_an_instrument_with_no_benchmark_gets_no_residual() -> None:
-    tracker = CrossSectionTracker(benchmarks={})
+    tracker = CrossSectionTracker()
     tracker.observe(levels(close="101"), AAPL, MINUTE)
     tracker.observe(levels(close="101", minute=2), AAPL, 2 * MINUTE)
     section = tracker.snapshot()

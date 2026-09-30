@@ -203,6 +203,40 @@ class SectorMap:
         """
         return self.markets.get(symbol.venue)
 
+    def benchmark_of(self, symbol: Symbol, *, on: date) -> Symbol | None:
+        """What this instrument's return should be regressed on, on a session.
+
+        Its sector proxy where it has one, its venue's market leg otherwise.
+        **Sector first**, because a mega-cap's move against its own sector is
+        what §5.4 and §5.5 are about — residualising AAPL against SPY leaves the
+        whole technology factor in the residual, which is the thing those
+        strategies exist to strip out.
+
+        Args:
+            symbol: The instrument.
+            on: The session, so a reclassification is respected.
+
+        Returns:
+            The benchmark, or `None` for an instrument with neither — a
+            benchmark itself, or a listing on a venue with no market leg. `None`
+            means no beta and therefore no residual, which keeps the name out of
+            a residual ranking rather than into it unadjusted.
+
+        Example:
+            >>> from neurotrade.core.types import Venue
+            >>> spy = Symbol("SPY", Venue.ARCA)
+            >>> aapl, xlk = Symbol("AAPL", Venue.NASDAQ), Symbol("XLK", Venue.ARCA)
+            >>> sectors = SectorMap(
+            ...     [SectorAssignment(aapl, xlk, UNKNOWN_SINCE, None)],
+            ...     {Venue.NASDAQ: spy},
+            ... )
+            >>> sectors.benchmark_of(aapl, on=date(2024, 7, 8)).ticker
+            'XLK'
+            >>> sectors.benchmark_of(spy, on=date(2024, 7, 8)) is None
+            True
+        """
+        return self.sector_of(symbol, on=on) or self.market_of(symbol)
+
     def members(self, sector: Symbol, *, on: date) -> tuple[Symbol, ...]:
         """Every instrument in one sector on a session, in universe order."""
         return tuple(

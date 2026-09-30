@@ -16,7 +16,7 @@ from typing import ClassVar
 import pytest
 
 from neurotrade.bus import HandlerFailed
-from neurotrade.core.clock import SimClock
+from neurotrade.core.clock import Nanos, SimClock
 from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.intent import EntryTrigger, Intent
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
@@ -439,3 +439,62 @@ def test_warmup_never_reaches_before_the_epoch() -> None:
     engine = engine_with(context)
     engine.add_strategy(Proposer())
     assert engine.run(0, 100, warmup_ns=1_000).run.events_read == 2
+
+
+# ── The overnight quarantine ────────────────────────────────────────────
+
+
+class Nightly(Strategy):
+    """An overnight strategy, for the quarantine tests."""
+
+    name, version = "nightly", "1.0.0"
+    holds_overnight: ClassVar[bool] = True
+
+
+class Daily(Strategy):
+    """A day strategy. The default, stated for contrast."""
+
+    name, version = "daily", "1.0.0"
+
+
+def empty_engine(*, overnight: bool = False) -> BacktestEngine:
+    class EmptyStore:
+        def write_bars(self, bars: Sequence[Bar], *, source: str, session_date: date) -> None: ...
+
+        def read_bars(
+            self, symbol: Symbol, interval: BarInterval, start: Nanos, end: Nanos
+        ) -> Iterator[Bar]:
+            return iter(())
+
+    return BacktestEngine(CorpusFeed(EmptyStore(), (AAPL,), BarInterval.MIN_1), overnight=overnight)
+
+
+def test_a_day_engine_refuses_an_overnight_strategy() -> None:
+    """Reg-T overnight margin is 2:1 against 4:1, and a stop cannot fill through a gap.
+
+    A mixed run's risk model is therefore wrong for every position in it, so the
+    refusal is structural rather than left to each strategy to respect.
+    """
+    with pytest.raises(ValueError, match="is a overnight strategy and this is a day engine"):
+        empty_engine().add_strategy(Nightly())
+
+
+def test_an_overnight_engine_refuses_a_day_strategy() -> None:
+    """Both directions, so the quarantine cannot be crossed from either side."""
+    with pytest.raises(ValueError, match="is a day strategy and this is a overnight engine"):
+        empty_engine(overnight=True).add_strategy(Daily())
+
+
+def test_each_engine_hosts_its_own_family() -> None:
+    day = empty_engine()
+    day.add_strategy(Daily())
+    night = empty_engine(overnight=True)
+    night.add_strategy(Nightly())
+    assert day.strategies == ("daily",)
+    assert night.strategies == ("nightly",)
+
+
+def test_a_day_engine_is_the_default() -> None:
+    """The safe direction: a strategy that forgets to declare stays intraday."""
+    assert Daily.holds_overnight is False
+    assert empty_engine().overnight is False

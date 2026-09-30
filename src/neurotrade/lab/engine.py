@@ -189,6 +189,7 @@ class BacktestEngine:
     context: ContextSource = field(default_factory=NullContext)
     bus: EventBus = field(default_factory=EventBus)
     ungated: bool = False  # research only: let UNKNOWN permit what it otherwise blocks
+    overnight: bool = False  # host the overnight family instead of the day family, never both
 
     _digest: RunDigest = field(default_factory=RunDigest, init=False, repr=False)
     _strategies: list[Strategy] = field(default_factory=list, init=False, repr=False)
@@ -214,6 +215,15 @@ class BacktestEngine:
                 the order it will be invoked in, and therefore part of the run
                 digest.
 
+        Raises:
+            ValueError: If the strategy's `holds_overnight` disagrees with this
+                engine's `overnight`. One engine hosts the day family or the
+                overnight family, never both — Phase 2 plan decision 2. The
+                refusal is structural rather than advisory because the two have
+                different margin (2:1 against 4:1) and different exit mechanics
+                (a stop cannot fill through a gap), so a mixed run's risk model
+                is wrong for every position in it.
+
         Example:
             >>> from neurotrade.core.events import BarInterval
             >>> from neurotrade.lab.engine import BacktestEngine
@@ -232,6 +242,13 @@ class BacktestEngine:
             >>> engine.strategies
             ('quiet',)
         """
+        if strategy.holds_overnight is not self.overnight:
+            wanted = "overnight" if strategy.holds_overnight else "day"
+            have = "overnight" if self.overnight else "day"
+            raise ValueError(
+                f"{strategy.qualified_name} is a {wanted} strategy and this is a "
+                f"{have} engine; the two families are quarantined from each other"
+            )
         self.context.declare(strategy)
         self._strategies.append(strategy)
         self.bus.subscribe(Bar, self._handler_for(strategy))

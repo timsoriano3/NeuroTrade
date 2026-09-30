@@ -59,7 +59,7 @@ different versions of one feature each get their own (§10.2).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Final
 
@@ -70,6 +70,7 @@ from neurotrade.core.ports import CalendarPort
 from neurotrade.core.types import Symbol, Venue
 from neurotrade.features.cross_section import (
     DEFAULT_TRAILING_MINUTES,
+    BenchmarkSource,
     CrossSection,
     CrossSectionTracker,
 )
@@ -81,6 +82,7 @@ from neurotrade.strategies.base import Regime, Strategy, StrategyContext
 __all__ = [
     "LULL_ENDS_AFTER_OPEN_NS",
     "LULL_STARTS_AFTER_OPEN_NS",
+    "NEXT_SESSION_SEARCH_DAYS",
     "MarketContext",
     "RegimeSource",
     "market_phase",
@@ -95,6 +97,13 @@ LULL_STARTS_AFTER_OPEN_NS: Final = 150 * _MINUTE_NS
 
 #: 14:00 ET for an 09:30 open. Clipped by the close on a half day.
 LULL_ENDS_AFTER_OPEN_NS: Final = 270 * _MINUTE_NS
+
+NEXT_SESSION_SEARCH_DAYS: Final = 10
+"""Calendar days searched forward for the next trading session.
+
+Ten covers every gap a North American venue produces — the longest is a holiday
+weekend — and bounds the search so a venue whose published schedule has ended is
+reported as "no next session" rather than walked indefinitely."""
 
 #: Classifies the regime for one moment, given the session that holds it.
 #: Phase 5 replaces the default with the HMM of §5.7; the seam is here so that
@@ -187,6 +196,7 @@ class MarketContext:
         "_features",
         "_interval",
         "_key",
+        "_next_opens",
         "_regime_source",
         "_resolver",
         "_session_now",
@@ -206,7 +216,7 @@ class MarketContext:
         calendar: CalendarPort,
         interval: BarInterval = BarInterval.MIN_1,
         regime_source: RegimeSource = time_of_day_regime,
-        benchmarks: Mapping[Symbol, Symbol] | None = None,
+        benchmarks: BenchmarkSource | None = None,
         trailing_minutes: int = DEFAULT_TRAILING_MINUTES,
     ) -> None:
         """Wire the context to a feature library and a calendar.
@@ -218,12 +228,12 @@ class MarketContext:
                 match it.
             regime_source: Classifier. Defaults to the time-of-day rule; Phase
                 5 passes the HMM here instead.
-            benchmarks: Instrument to the symbol its beta is measured against —
-                built from `core.sectors.SectorMap` by the caller, because the
-                map is point-in-time and this layer holds no dates. An
-                instrument absent from it gets no beta, and therefore no
-                residual. Only read when a strategy declares
-                `needs_cross_section`.
+            benchmarks: Resolves what each instrument's return is regressed
+                on, per session — a `core.sectors.SectorMap`. Passed as a
+                resolver rather than a flat map so a reclassification is
+                respected; see `features/cross_section.BenchmarkSource`. `None`
+                means nothing has a beta, so nothing has a residual. Only read
+                when a strategy declares `needs_cross_section`.
             trailing_minutes: Window for the cross-section's trailing return.
         """
         self._features = features
@@ -233,12 +243,13 @@ class MarketContext:
         self._specs: dict[str, FeatureSpec] = {}
         self._resolver = FeatureResolver({}, interval=interval)
         self._sessions: dict[tuple[Venue, date], TradingSession | None] = {}
+        self._next_opens: dict[tuple[Venue, date], Nanos | None] = {}
         self._tracker = SessionLevelTracker()
         self._key: tuple[Symbol, Nanos] | None = None
         self._values: dict[str, float | None] = {}
         self._session_now: TradingSession | None = None
         self._started = False
-        self._benchmarks = dict(benchmarks or {})
+        self._benchmarks = benchmarks
         self._trailing_minutes = trailing_minutes
         self._wants_cross_section = False
         self._cross_section: CrossSectionTracker | None = None
@@ -312,7 +323,9 @@ class MarketContext:
         self._resolver.observe(bar)
         self._values = self._resolver.resolve(bar)
         self._session_now = self._session_for(bar)
-        self._tracker.update(bar, self._session_now)
+        self._tracker.update(
+            bar, self._session_now, next_open_ns=self._next_open(self._session_now)
+        )
         if self._cross_section is not None:
             # After the level tracker, and from its output: the session anchors
             # have one implementation, and the cross-section adds only what is
@@ -388,6 +401,29 @@ class MarketContext:
             if session is not None and session.holds_bar(bar.ts_event):
                 return session
         return None
+
+    def _next_open(self, session: TradingSession | None) -> Nanos | None:
+        """When the venue next opens after this session, memoised.
+
+        The calendar is asked for trading days rather than dates being stepped
+        one at a time, so a holiday weekend costs one lookup instead of four.
+        `NEXT_SESSION_SEARCH_DAYS` bounds the search: the longest gap a US or
+        Canadian venue produces is a holiday weekend, and a bound at all keeps a
+        venue whose published schedule has run out from being walked forever.
+
+        Returns `None` when nothing later is scheduled — the end of the calendar,
+        which an overnight strategy reads as "cannot state an exit" and declines.
+        """
+        if session is None:
+            return None
+        key = (session.venue, session.session_date)
+        if key not in self._next_opens:
+            after = session.session_date + timedelta(days=1)
+            horizon = session.session_date + timedelta(days=NEXT_SESSION_SEARCH_DAYS)
+            later = self._calendar.sessions(session.venue, after, horizon)
+            following = self._session(session.venue, later[0]) if later else None
+            self._next_opens[key] = None if following is None else following.open_ns
+        return self._next_opens[key]
 
     def _session(self, venue: Venue, day: date) -> TradingSession | None:
         """One session, memoised. A backtest asks for the same day 390 times."""

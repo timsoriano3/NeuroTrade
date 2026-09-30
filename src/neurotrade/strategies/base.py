@@ -237,6 +237,16 @@ class Strategy(ABC):
     trading (§5.9). A scalper needs a higher bar than a multi-hour hold, because
     it pays the spread far more often for the same gross move."""
 
+    holds_overnight: ClassVar[bool] = False
+    """Whether this strategy's positions survive the closing bell.
+
+    **A quarantine, not a preference** (Phase 2 plan, decision 2). Reg-T
+    overnight margin is 2:1 against 4:1 intraday, and a stop cannot fill through
+    a gap — so an overnight position's risk model is not the day engine's, and
+    mixing the two corrupts the sizing model for both. `BacktestEngine` refuses
+    to host a mismatched strategy rather than trusting each one to stay on its
+    own side, which is the same reasoning `regimes` uses one level down."""
+
     needs_cross_section: ClassVar[bool] = False
     """Whether this strategy reads the rest of the universe.
 

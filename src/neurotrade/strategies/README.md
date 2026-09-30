@@ -12,7 +12,7 @@ filtering out the proposals that will not work.
 
 | File | What it does |
 |---|---|
-| `base.py` | The contract every strategy implements, and the registry that holds them |
+| `base.py` | The contract every strategy implements, the registry that holds them, and the `holds_overnight` / `needs_cross_section` declarations |
 | `context.py` | Fills in what a strategy may see: venue phase, regime, features, session levels, the cross-section |
 | `arsenal.py` | The registry every plugin registers into |
 | `plugins.py` | Imports every shipped plugin, for a caller that resolves a strategy by name |
@@ -27,6 +27,22 @@ filtering out the proposals that will not work.
 | `intraday_reversal.py` | Fades the universe's biggest trailing movers (§5.5) |
 | `relative_strength.py` | Buys the largest sector-adjusted residuals (§5.4) |
 | `residual_reversion.py` | Sells the same residuals (§5.5) |
+| `prior_close_reversal.py` | Fades a close pushed away from VWAP, **held overnight** (§5.3) |
+
+## The overnight quarantine
+
+`prior_close_reversal` is the only strategy whose positions survive the bell, and
+it declares `holds_overnight`. `BacktestEngine(overnight=…)` hosts the day family
+or the overnight family and **refuses a mismatch** — Phase 2 plan decision 2.
+The reason is not tidiness: Reg-T overnight margin is 2:1 against 4:1 intraday,
+and a stop cannot fill through a gap, so an overnight position's risk model is
+not the day engine's and a mixed run's sizing is wrong for every position in it.
+
+Its exit is the next session's open, read from `SessionLevels.next_open_ns` —
+which comes out of the trading calendar, published years ahead, so it is not
+market data and reading it is not lookahead. A fixed 17.5-hour span would land on
+a Saturday after a Friday close, where the labeller finds no bars and the barrier
+collapses back to Friday's bell.
 
 ## The three pairings, and why they exist
 

@@ -56,6 +56,7 @@ from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.adapters.storage.parquet_store import ParquetStore
 from neurotrade.adapters.storage.schemas import Source
 from neurotrade.adapters.storage.trial_ledger import TrialLedgerStore
+from neurotrade.adapters.universe.sector_file import InvalidSectorFile, SectorFile
 from neurotrade.adapters.universe.universe_file import InvalidUniverseFile, UniverseFile
 from neurotrade.adapters.universe.universe_history_parquet import UniverseHistoryStore
 from neurotrade.config import (
@@ -99,6 +100,7 @@ range is only there to satisfy the port; bounding it by date would mean the CLI
 needing a venue calendar to know when the session ended."""
 
 _DEFAULT_UNIVERSE = DEFAULT_CONFIG_DIR / "universe.yaml"
+_DEFAULT_SECTORS = DEFAULT_CONFIG_DIR / "sectors.yaml"
 """The committed seed universe. A flag rather than a setting because the
 universe is data, not configuration — see `Universe.digest`."""
 
@@ -1778,6 +1780,16 @@ def lab_measure(
             help="Shares every modelled fill is charged at. Costs are not linear in it.",
         ),
     ] = DEFAULT_MEASURE_QUANTITY,
+    sectors_path: Annotated[
+        Path,
+        typer.Option(
+            "--sectors",
+            help=(
+                "Point-in-time sector map. Only read by a cross-sectional strategy; "
+                "without it every beta is None and those strategies fire nowhere."
+            ),
+        ),
+    ] = _DEFAULT_SECTORS,
     cost_curve: Annotated[
         str | None,
         typer.Option(
@@ -1918,6 +1930,27 @@ def lab_measure(
     if quantity < 1:
         typer.echo(f"--quantity {quantity} must be at least one share", err=True)
         raise typer.Exit(code=2)
+
+    # Loaded for every run, not only a cross-sectional one: a strategy that does
+    # not declare `needs_cross_section` never sees it, and a malformed file is
+    # worth failing on at startup rather than after a seven-minute engine pass.
+    try:
+        sectors = SectorFile(sectors_path).sectors()
+    except (FileNotFoundError, InvalidSectorFile) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+    if cls.needs_cross_section:
+        # Counted as of the window's end, which is a *report* rather than a
+        # decision — the tracker itself resolves per session, so the number here
+        # cannot leak into a label.
+        as_of = to_datetime(last).date()
+        classified = sum(1 for symbol in wanted if sectors.sector_of(symbol, on=as_of) is not None)
+        typer.echo(
+            f"  {cls.name} reads the universe: {classified} of {len(wanted)} instruments "
+            f"have a sector, {sectors.unknown_starts} assignment(s) are backdated guesses "
+            f"(sector map {sectors.digest})",
+            err=True,
+        )
     try:
         levels = _cost_levels(cost_curve)
     except ValueError as error:
@@ -1938,6 +1971,7 @@ def lab_measure(
         quantity=Quantity(quantity),
         warmup_ns=warmup_days * 86_400_000_000_000,
         cost_levels=levels,
+        benchmarks=sectors,
     )
 
     for run in measurement.runs:

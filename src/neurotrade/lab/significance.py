@@ -656,17 +656,29 @@ class HaircutReport:
     @property
     def bonferroni(self) -> float:
         """Sharpe ratio implied by `bonferroni_p` at the same sample size."""
-        return _sharpe_for_p(self.bonferroni_p, self.n_observations)
+        return self._signed(self.bonferroni_p)
 
     @property
     def holm(self) -> float:
         """Sharpe ratio implied by `holm_p`."""
-        return _sharpe_for_p(self.holm_p, self.n_observations)
+        return self._signed(self.holm_p)
 
     @property
     def bhy(self) -> float:
         """Sharpe ratio implied by `bhy_p`."""
-        return _sharpe_for_p(self.bhy_p, self.n_observations)
+        return self._signed(self.bhy_p)
+
+    def _signed(self, p_value: float) -> float:
+        """The adjusted Sharpe, carrying `observed`'s sign.
+
+        The p-value is two-sided and therefore blind to direction, so the
+        magnitude has to be signed back. Without this a correction applied to a
+        **negative** Sharpe reports a positive adjusted one — measured on
+        `momentum_ignition`, where an observed -0.0914 printed as bonferroni
+        +0.0801 and read as the correction having improved the result.
+        """
+        magnitude = _sharpe_for_p(p_value, self.n_observations)
+        return -magnitude if self.observed < 0 else magnitude
 
     def haircut(self, adjusted: float) -> float | None:
         """Fraction of the observed Sharpe one correction takes away.

@@ -42,6 +42,7 @@ from neurotrade.core.intent import Intent
 from neurotrade.core.ports import CalendarPort, StoragePort
 from neurotrade.core.trials import TrialSource
 from neurotrade.core.types import Quantity, Symbol
+from neurotrade.features.cross_section import BenchmarkSource
 from neurotrade.features.registry import FeatureRegistry
 from neurotrade.lab.bootstrap import DEFAULT_RESAMPLES, SharpeInterval, bootstrap_sharpe
 from neurotrade.lab.cv import CombinatorialPurgedCV
@@ -379,6 +380,7 @@ def measure_strategy(
     source: TrialSource = TrialSource.MANUAL,
     cost_levels: Sequence[tuple[float, CostModel]] = (),
     resamples: int = DEFAULT_RESAMPLES,
+    benchmarks: BenchmarkSource | None = None,
 ) -> Measurement:
     """Run every variant a strategy declares over the corpus and assess them.
 
@@ -421,6 +423,11 @@ def measure_strategy(
             Not a search: the variant is chosen once at `costs`, so no level here
             spends a trial.
         resamples: Resamples for the session bootstrap on the winner's Sharpe.
+        benchmarks: What each instrument's return is regressed on, per session —
+            a `core.sectors.SectorMap`. Only read by a strategy that declares
+            `needs_cross_section`; without it every beta and every residual is
+            `None`, so a residual-ranking strategy fires nowhere. Silent rather
+            than an error, because most strategies neither need nor read it.
 
     Returns:
         The measurement. `evaluation` is `None`, with a reason, when the pooled
@@ -445,8 +452,17 @@ def measure_strategy(
         engine = BacktestEngine(
             feed=CorpusFeed(store=store, symbols=ordered, interval=interval),
             clock=SimClock(0),
-            context=MarketContext(features=features, calendar=calendar, interval=interval),
+            context=MarketContext(
+                features=features,
+                calendar=calendar,
+                interval=interval,
+                benchmarks=benchmarks,
+            ),
             ungated=ungated,
+            # Taken from the strategy rather than from a parameter: the family
+            # is a property of the rule, and a caller who had to remember to
+            # pass it is a caller who will forget.
+            overnight=strategy.holds_overnight,
         )
         engine.add_strategy(instance)
         result = engine.run(start, end, warmup_ns=warmup_ns)

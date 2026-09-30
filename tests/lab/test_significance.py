@@ -504,3 +504,27 @@ def test_the_haircut_refuses_a_sample_it_cannot_test(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         haircut_sharpe(0.1, trial_sharpes=trial_sharpes, n_observations=n_observations)
+
+
+def test_a_correction_on_a_negative_sharpe_stays_negative() -> None:
+    """Two-sided p-values are blind to direction, so the sign has to be put back.
+
+    Measured on a real run: `momentum_ignition` at an observed -0.0914 reported
+    bonferroni +0.0801, which reads as the multiple-testing correction having
+    *improved* the result.
+    """
+    report = haircut_sharpe(-0.0914, trial_sharpes=[-0.105, -0.0914, -0.12], n_observations=1018)
+    assert report.observed < 0
+    for adjusted in (report.bonferroni, report.holm, report.bhy):
+        assert adjusted < 0
+        # Still a discount: the magnitude shrinks toward zero, never past it.
+        # `>=` rather than `>` because this Sharpe is not the set's winner, and
+        # Holm leaves a non-winner's own p-value untouched at rank 1 of its
+        # prefix.
+        assert abs(adjusted) <= abs(report.observed) + 1e-12
+
+
+def test_a_correction_on_a_positive_sharpe_stays_positive() -> None:
+    report = haircut_sharpe(0.09, trial_sharpes=[0.09, 0.03], n_observations=500)
+    for adjusted in (report.bonferroni, report.holm, report.bhy):
+        assert 0 <= adjusted < report.observed

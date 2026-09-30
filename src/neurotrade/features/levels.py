@@ -413,6 +413,18 @@ class SessionLevels:
     """Volume-weighted dispersion of price around `vwap`, as a fraction of it —
     the unit §5.3's VWAP bands are quoted in. `None` before anything traded."""
 
+    next_open_ns: Nanos | None = None
+    """When the next session opens, UTC nanoseconds — the only forward-looking
+    field on this snapshot, and safe because a trading calendar is published
+    years ahead and is not market data.
+
+    It exists for one reason: an overnight strategy has to state its exit, and
+    `Intent.horizon_ns` is a span. A fixed 17.5 hours works on a weeknight and
+    lands on a Saturday after a Friday close, where the labeller finds no bars
+    and the barrier collapses back to Friday's bell. `None` when the calendar
+    holds no later session — the last day of a run, or a venue whose schedule
+    ends."""
+
     session_volume: Decimal = Decimal(0)
     """Shares traded since the open. `Decimal` because it is a quantity the
     corpus holds exactly, not a derived statistic — `relative_volume_from_open`
@@ -567,7 +579,9 @@ class SessionLevelTracker:
         self._volumes: dict[Symbol, list[dict[int, Decimal]]] = {}
         self._opening_bars: dict[Symbol, list[Bar]] = {}
 
-    def update(self, bar: Bar, session: TradingSession | None) -> None:
+    def update(
+        self, bar: Bar, session: TradingSession | None, *, next_open_ns: Nanos | None = None
+    ) -> None:
         """Fold one bar into its symbol's levels.
 
         Args:
@@ -577,6 +591,11 @@ class SessionLevelTracker:
                 `useRTH=1`, so one is a data fault for `ingest/quality.py` to
                 report, and accumulating it would put after-hours prints into a
                 session VWAP.
+            next_open_ns: When the next session opens. Supplied by the caller
+                because this tracker holds no calendar — it is handed a
+                `TradingSession` per bar and has no way to ask for the following
+                one. `None` leaves `SessionLevels.next_open_ns` unset, which is
+                what an overnight strategy reads as "cannot state an exit".
 
         Example:
             >>> from neurotrade.core.calendar import TradingSession
@@ -630,6 +649,7 @@ class SessionLevelTracker:
             prior_close=self._prior_close.get(symbol),
             prior_range_mean=self._range_mean(symbol),
             opening_ranges=ranges,
+            next_open_ns=next_open_ns,
             session_volume=self._volume[symbol],
             relative_volume_from_open=self._relative_volume(symbol, minute),
             mean_abs_move_from_open=self._mean_move(symbol, minute),
