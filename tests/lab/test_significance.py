@@ -528,3 +528,23 @@ def test_a_correction_on_a_positive_sharpe_stays_positive() -> None:
     report = haircut_sharpe(0.09, trial_sharpes=[0.09, 0.03], n_observations=500)
     for adjusted in (report.bonferroni, report.holm, report.bhy):
         assert 0 <= adjusted < report.observed
+
+
+def test_a_haircut_prints_when_the_p_value_underflows_to_zero() -> None:
+    """A result significant enough to zero its own p-value must still format.
+
+    `vwap_band_reversion` at 58 names scored -0.0732 over 79,010 observations —
+    20.6 sigma, where `1.0 - cdf(t)` underflows and the two-sided p-value is
+    exactly 0.0. `_sharpe_for_p` then asked for `inv_cdf(1.0)`, which raises, so
+    a 5h47m measurement died inside `Measurement.__str__` after its trials were
+    already ledgered: the numbers survived and the report did not.
+    """
+    report = haircut_sharpe(
+        -0.0732, trial_sharpes=[-0.1638, -0.1228, -0.0732], n_observations=79010
+    )
+    assert report.p_value == 0.0
+    # Formatting is the thing that used to raise.
+    assert "bonferroni" in str(report)
+    # A negative observation stays negative through every correction.
+    for adjusted in (report.bonferroni, report.holm, report.bhy):
+        assert adjusted <= 0.0

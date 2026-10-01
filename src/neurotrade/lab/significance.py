@@ -62,6 +62,12 @@ __all__ = [
 
 _NORMAL: Final = NormalDist()
 
+# The largest quantile a float can hold below 1.0. `inv_cdf(1.0)` raises, and a
+# two-sided p-value under ~2e-16 makes `1.0 - p / 2` round to exactly 1.0, so
+# every such p-value has to share this one quantile. It corresponds to about
+# 8.2 sigma — far past any threshold this module tests against.
+_LARGEST_QUANTILE_BELOW_ONE: Final = math.nextafter(1.0, 0.0)
+
 _EULER_MASCHERONI: Final = 0.5772156649015329
 """Appears in the expected maximum of N normal draws (Bailey & López de Prado).
 
@@ -840,7 +846,21 @@ def _sharpe_for_p(p_value: float, n_observations: int) -> float:
     Returns 0.0 at `p >= 1`: the correction has taken the whole result, and
     `inv_cdf(0.5)` is exactly zero anyway — spelled out so the boundary does not
     depend on floating-point luck.
+
+    Saturates at about `8.2 / sqrt(n)` for `p` at or below ~2e-16, including
+    `p == 0.0`, which `_p_for_sharpe` returns once the t-statistic is large
+    enough to underflow. Both ends are clamped rather than raising, because this
+    is reached from `__str__` and a formatting error would discard a finished
+    measurement.
     """
     if p_value >= 1.0:
         return 0.0
-    return _NORMAL.inv_cdf(1.0 - p_value / 2.0) / math.sqrt(n_observations)
+    # A p-value below ~2e-16 makes `1.0 - p_value / 2.0` round to exactly 1.0,
+    # and `inv_cdf(1.0)` raises `StatisticsError`. That killed a 5h47m
+    # measurement of `vwap_band_reversion` (58 names, 79,010 observations,
+    # Sharpe -0.0732 -> 20.6 sigma) inside `Measurement.__str__`, *after* its
+    # trials were already in the ledger: the numbers survived and the report did
+    # not. Clamping keeps the print finite. No haircut is worth losing a run to,
+    # and at this significance the implied Sharpe is off any scale we compare on.
+    quantile = min(1.0 - p_value / 2.0, _LARGEST_QUANTILE_BELOW_ONE)
+    return _NORMAL.inv_cdf(quantile) / math.sqrt(n_observations)
