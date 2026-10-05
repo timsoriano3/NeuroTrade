@@ -1616,3 +1616,44 @@ def test_scaling_raises_commission_but_leaves_the_tick_floor_standing() -> None:
     assert dear.fees.commission(Quantity(1_000), Price("100")).amount == Decimal("20.00000000")
     # Every scalable spread term is zero, and the result is still one tick.
     assert _scaled_costs(0.0).spreads.spread(Price("100")) == Decimal("0.01")
+
+
+# ── the spread override ─────────────────────────────────────────────────
+
+
+def test_the_default_spread_is_five_basis_points_of_price() -> None:
+    """The baseline every measurement so far was taken against."""
+    assert _reference_costs().spreads.spread(Price("200")) == Decimal("0.1")
+
+
+def test_a_zero_spread_override_leaves_only_the_tick_floor() -> None:
+    """The penny-spread model: one cent regardless of price level.
+
+    5 bp of a $200 name is $0.10, ten times the cent a megacap actually quotes,
+    so the proportional estimate is the wrong order of magnitude at the top of
+    the universe while being about right at $20. `tick_size` is not a scalable
+    field, so it survives the override.
+    """
+    tick_only = _reference_costs(Decimal("0"))
+    assert tick_only.spreads.spread(Price("200")) == Decimal("0.01")
+    assert tick_only.spreads.spread(Price("20")) == Decimal("0.01")
+    # Commission is untouched: the override is about the spread, not the broker.
+    assert tick_only.fees.commission(Quantity(1_000), Price("200")) == _reference_costs(
+        None
+    ).fees.commission(Quantity(1_000), Price("200"))
+
+
+def test_the_override_is_what_every_curve_multiple_is_taken_against() -> None:
+    """Otherwise the curve would quote multiples of a model the headline did not use."""
+    levels = _cost_levels("1,2", Decimal("0.0001"))
+    assert [scale for scale, _ in levels] == [1.0, 2.0]
+    one_x = dict(levels)[1.0]
+    assert one_x.spreads.spread(Price("1000")) == Decimal("0.1")  # 1 bp of 1000
+    two_x = dict(levels)[2.0]
+    assert two_x.spreads.spread(Price("1000")) == Decimal("0.2")
+
+
+def test_a_negative_spread_override_is_refused() -> None:
+    """A spread below zero is a subsidy for trading."""
+    with pytest.raises(ValueError, match=r"fraction -0\.0001 must not be negative"):
+        _reference_costs(Decimal("-0.0001"))

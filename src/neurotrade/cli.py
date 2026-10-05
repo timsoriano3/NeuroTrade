@@ -1654,16 +1654,34 @@ DEFAULT_COST_MULTIPLES_TEXT: Final = ",".join(f"{value:g}" for value in DEFAULT_
 """The default sweep as the flag would be typed, for the help text."""
 
 
-def _reference_costs() -> CostModel:
-    """The `1x` cost model: IBKR's US fixed tier against a 5 bp floored spread.
+def _reference_costs(spread_fraction: Decimal | None = None) -> CostModel:
+    """The `1x` cost model: IBKR's US fixed tier against a floored spread.
 
     One function so the reference the curve is quoted against and the reference
     the headline number is measured at cannot drift apart.
+
+    Args:
+        spread_fraction: Proportional spread estimate as a fraction of price.
+            `None` keeps `FlooredSpread`'s 5 bp research default. The override
+            exists because 5 bp of price is the wrong order of magnitude for a
+            penny-spread name — 5 bp of a $200 stock is $0.10, where the real
+            quoted spread is one cent — while being about right for a $20 one.
+            The error is therefore price-dependent, which is exactly what a
+            uniform `--cost-curve` multiple cannot express.
+
+    Example:
+        >>> _reference_costs(Decimal("0")).spreads.spread(Price("200"))
+        Decimal('0.01')
+        >>> _reference_costs().spreads.spread(Price("200"))
+        Decimal('0.1')
     """
-    return CostModel(spreads=FlooredSpread(), fees=FeeSchedule())
+    spreads = (
+        FlooredSpread() if spread_fraction is None else FlooredSpread(fraction=spread_fraction)
+    )
+    return CostModel(spreads=spreads, fees=FeeSchedule())
 
 
-def _scaled_costs(scale: float) -> CostModel:
+def _scaled_costs(scale: float, spread_fraction: Decimal | None = None) -> CostModel:
     """The reference cost model with every scalable term multiplied by `scale`.
 
     **Two floors do not scale, and that is the point.** `FlooredSpread` never
@@ -1676,6 +1694,8 @@ def _scaled_costs(scale: float) -> CostModel:
         scale: Multiple of the reference terms. Zero is permitted and leaves the
             tick floor standing, which is the closest this cost model comes to
             free.
+        spread_fraction: Passed to `_reference_costs`; overrides the 5 bp
+            proportional spread the multiples are taken against.
 
     Returns:
         The scaled model.
@@ -1692,7 +1712,7 @@ def _scaled_costs(scale: float) -> CostModel:
     # both cost dataclasses are `slots=True`, so their defaults are not readable
     # from the class, and going through `_reference_costs` keeps one definition of
     # what `1x` means.
-    reference = _reference_costs()
+    reference = _reference_costs(spread_fraction)
     assert isinstance(reference.spreads, FlooredSpread)  # the reference, by construction
     return CostModel(
         spreads=FlooredSpread(
@@ -1706,7 +1726,9 @@ def _scaled_costs(scale: float) -> CostModel:
     )
 
 
-def _cost_levels(specification: str | None) -> tuple[tuple[float, CostModel], ...]:
+def _cost_levels(
+    specification: str | None, spread_fraction: Decimal | None = None
+) -> tuple[tuple[float, CostModel], ...]:
     """Parse `--cost-curve` into the levels `measure_strategy` sweeps.
 
     Args:
@@ -1714,6 +1736,8 @@ def _cost_levels(specification: str | None) -> tuple[tuple[float, CostModel], ..
             defaults, or `None` for no curve at all. An empty string and `None`
             are deliberately different: `--cost-curve ""` asks for the default
             sweep, while omitting the flag asks for nothing.
+        spread_fraction: Passed to `_scaled_costs`; overrides the 5 bp
+            proportional spread every multiple is taken against.
 
     Returns:
         `(scale, model)` pairs, ascending and de-duplicated. Empty when no curve
@@ -1729,7 +1753,7 @@ def _cost_levels(specification: str | None) -> tuple[tuple[float, CostModel], ..
         scales = sorted({float(field) for field in fields}) or list(DEFAULT_COST_MULTIPLES)
     except ValueError as error:
         raise ValueError(f"{error} — expected numbers like {DEFAULT_COST_MULTIPLES_TEXT}") from None
-    return tuple((scale, _scaled_costs(scale)) for scale in scales)
+    return tuple((scale, _scaled_costs(scale, spread_fraction)) for scale in scales)
 
 
 @lab_app.command("measure")
@@ -1798,6 +1822,19 @@ def lab_measure(
                 "Comma-separated cost multiples to re-label the winner at, "
                 f"e.g. {DEFAULT_COST_MULTIPLES_TEXT}. Costs the labelling, not a second "
                 "backtest."
+            ),
+        ),
+    ] = None,
+    spread_bps: Annotated[
+        float | None,
+        typer.Option(
+            "--spread-bps",
+            help=(
+                "Proportional spread estimate in basis points of price, overriding the "
+                "5 bp research default. 0 leaves the one-tick floor standing, which is "
+                "the realistic model for a penny-spread megacap and far too cheap for a "
+                "thin name. Changes what 1x means, so a result measured with it is not "
+                "comparable to one without."
             ),
         ),
     ] = None,
@@ -1951,11 +1988,24 @@ def lab_measure(
             f"(sector map {sectors.digest})",
             err=True,
         )
+    # A spread override changes what every cost number in this run means, so it is
+    # echoed rather than left for the reader to infer from the digest.
+    fraction = None if spread_bps is None else Decimal(str(spread_bps)) / Decimal(10_000)
     try:
-        levels = _cost_levels(cost_curve)
+        levels = _cost_levels(cost_curve, fraction)
+        reference = _reference_costs(fraction)
     except ValueError as error:
-        typer.echo(f"--cost-curve {cost_curve}: {error}", err=True)
+        flag = (
+            f"--spread-bps {spread_bps}" if fraction is not None else f"--cost-curve {cost_curve}"
+        )
+        typer.echo(f"{flag}: {error}", err=True)
         raise typer.Exit(code=2) from error
+    if fraction is not None:
+        typer.echo(
+            f"  spread override: {spread_bps} bp of price, floored at one tick "
+            f"— 1x is NOT the default cost model",
+            err=True,
+        )
 
     measurement = measure_strategy(
         cls,
@@ -1967,7 +2017,7 @@ def lab_measure(
         end=last,
         ledger=ledger,
         clock=SimClock(clock.now_ns()),
-        costs=_reference_costs(),
+        costs=reference,
         quantity=Quantity(quantity),
         warmup_ns=warmup_days * 86_400_000_000_000,
         cost_levels=levels,
