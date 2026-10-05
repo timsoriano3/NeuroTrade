@@ -200,13 +200,18 @@ verify-lab: ## Prove gate G3: the lab rejects a snooped result, accepts a real o
 	@$(PY) neurotrade --profile $(PROFILE) lab verify \
 	   $(if $(SEED),--seed $(SEED),) $(if $(BARS),--bars $(BARS),)
 
-measure: ## Measure a strategy on the corpus; prints the split basis. STRATEGY= START=YYYY-MM-DD [END= SOURCE= SYMBOLS= WARMUP= LEDGER=]
+measure: ## Measure a strategy on the corpus; prints the split basis. STRATEGY= START=YYYY-MM-DD [END= SOURCE= SYMBOLS= WARMUP= LEDGER= COST_CURVE= SPREAD_BPS=]
 	@if [ -z "$(STRATEGY)" ]; then echo 'STRATEGY=<name> is required'; exit 2; fi
 	@if [ -z "$(START)" ]; then echo 'START=YYYY-MM-DD is required'; exit 2; fi
+# COST_CURVE=default means the CLI's own sweep, which it spells `--cost-curve ""`.
+# Make cannot distinguish an empty value from an unset one, so the sentinel carries
+# the distinction the CLI depends on: omitted asks for no curve at all.
 	$(PY) neurotrade --profile $(PROFILE) lab measure --strategy $(STRATEGY) --start $(START) \
 	  $(if $(END),--end $(END)) $(if $(SOURCE),--source $(SOURCE)) \
 	  $(if $(SYMBOLS),--symbols $(SYMBOLS)) $(if $(WARMUP),--warmup-days $(WARMUP)) \
-	  $(if $(LEDGER),--ledger $(LEDGER))
+	  $(if $(LEDGER),--ledger $(LEDGER)) \
+	  $(if $(COST_CURVE),--cost-curve $(if $(filter default,$(COST_CURVE)),"",$(COST_CURVE))) \
+	  $(if $(SPREAD_BPS),--spread-bps $(SPREAD_BPS))
 
 # ── Housekeeping ─────────────────────────────────────────────
 clean: ## Remove build and tool caches. Never touches data/.
