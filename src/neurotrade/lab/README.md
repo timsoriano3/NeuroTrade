@@ -15,7 +15,7 @@ difference.
 | `replay.py` | Replays a recorded session and proves the replay was faithful |
 | `feed.py` | The corpus as one ts-ordered bar stream, merged across a universe, split-adjusted on the way out |
 | `engine.py` | Runs strategies over that stream and collects their intents |
-| `labelling.py` | Triple-barrier labels, with costs applied inside, plus uniqueness weights for overlapping label spans |
+| `labelling.py` | Triple-barrier labels, with costs applied inside; the favourable and adverse excursions each trade reached while held, so exit efficiency is measurable; uniqueness weights for overlapping label spans |
 | `cv.py` | CPCV — every combination of test blocks, purged and embargoed — and walk-forward as the secondary check |
 | `significance.py` | Whether a result survives the search that found it: PSR, deflated Sharpe, PBO via CSCV, MinBTL, and Harvey-Liu haircuts |
 | `bootstrap.py` | How many *independent* bets a dependent sample is worth: resample whole sessions, read the effective observation count off the spread |

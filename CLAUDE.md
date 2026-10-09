@@ -89,7 +89,7 @@ make universe       # build point-in-time universe membership. START=YYYY-MM-DD 
 make actions        # fetch splits and dividends from Yahoo. START=YYYY-MM-DD [END=]
 make actions-check  # audit the daily corpus for gaps no action explains. START=YYYY-MM-DD [END= THRESHOLD=]
 make corpus-check   # audit the corpus for faults. START=YYYY-MM-DD [END= INTERVAL= SOURCE= LIMIT=]
-make measure        # measure a strategy on the corpus. STRATEGY= START= [END= SOURCE= SYMBOLS= WARMUP= LEDGER= COST_CURVE= SPREAD_BPS=]
+make measure        # measure a strategy on the corpus. STRATEGY= START= [END= SOURCE= SYMBOLS= WARMUP= LEDGER= COST_CURVE= SPREAD_BPS= JOURNAL=]
 ```
 
 Single test: `uv run pytest tests/path/test_x.py::test_name -x`
@@ -284,6 +284,29 @@ The main loop is the whole bill now.
 - **No task-list bookkeeping.** `TaskCreate`/`TaskUpdate` are denied in `.claude/settings.json`:
   119 such calls at 460k context bought nothing. Track steps in prose or a plan file. This
   overrides any skill that says to create todos.
+
+#### Always hand off with a restart prompt
+
+**Whenever you tell me to commit and clear — whether the hook fired or you noticed first — end the
+message with a copy-pasteable prompt for the next window**, in one fenced block, addressed to the
+next session. Never a summary of this one: it is an instruction to resume. It must carry, in this
+order and omitting nothing that applies:
+
+1. **The single next action**, as an imperative first line. Not "continue step 2" — the actual thing.
+2. **Repo state**: HEAD short hash and subject, what is committed vs still in the working tree, and
+   whether a handoff for uncommitted work is already written.
+3. **Exactly which `WORK/` files to read, and no others.** Name them; the point is to stop the next
+   session exploring. Say which single doc holds the plan.
+4. **Live identifiers** — run ids, digests, absolute paths to logs, ledgers and journals, pids of
+   anything still running, config hashes. Anything unreproducible without hours of compute.
+5. **Decisions already settled**, one line each, so they are not re-litigated. Include numbers I will
+   otherwise ask about again.
+6. **Known traps for this specific work** — pointers into `08-gotchas.mem.md`, plus anything found
+   this window that is not written down yet.
+7. **The gate that must pass**, and the model tier to run on.
+
+Write it so a session with no memory of this one can act on the first line without asking me
+anything. If something genuinely needs my decision first, say so as the opening line instead.
 
 ### Commit workflow — plan execution
 

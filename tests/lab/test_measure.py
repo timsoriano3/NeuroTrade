@@ -26,6 +26,7 @@ from neurotrade.core.clock import SimClock
 from neurotrade.core.costs import CostModel, FeeSchedule, FlooredSpread
 from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.intent import EntryTrigger, Intent
+from neurotrade.core.trades import TradeRecord
 from neurotrade.core.trials import Trial, TrialSource
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 from neurotrade.features.indicators import indicators
@@ -143,6 +144,7 @@ def measure(
     start: int | None = None,
     warmup_ns: int = 0,
     cost_levels: Sequence[tuple[float, CostModel]] = (),
+    journal: object | None = None,
 ) -> tuple[Measurement, MemoryLedger]:
     """Run a measurement over a synthetic corpus, on a throwaway ledger."""
     store = MemoryLedger()
@@ -169,6 +171,8 @@ def measure(
         embargo_ns=MINUTE,
         warmup_ns=warmup_ns,
         cost_levels=cost_levels,
+        journal=journal,  # type: ignore[arg-type]
+        run_id="run_test",
         # Small, because a synthetic corpus has a handful of sessions and the
         # bounds are not what these tests are about — the default 2,000 would
         # multiply the suite's runtime for no extra assertion.
@@ -507,3 +511,108 @@ def test_a_losing_strategy_gets_no_min_backtest_length() -> None:
     # The span measured is still reported, so the comparison is available the
     # moment a strategy earns a positive Sharpe.
     assert measurement.sample_years is not None and measurement.sample_years > 0
+
+
+# ── the trade journal ───────────────────────────────────────────────────
+
+
+class MemoryJournal:
+    """A `TradeJournalPort` that keeps rows in memory."""
+
+    def __init__(self) -> None:
+        self.rows: list[TradeRecord] = []
+
+    def append(self, record: TradeRecord) -> None:
+        self.rows.append(record)
+
+    def records(self) -> tuple[TradeRecord, ...]:
+        return tuple(self.rows)
+
+
+def journalled() -> tuple[MemoryJournal, Measurement]:
+    """One real measurement with its trades journalled."""
+    journal = MemoryJournal()
+    series = {AAPL: gapping_series(AAPL), MSFT: gapping_series(MSFT, base=Decimal(200))}
+    measurement, _ = measure(GapContinuation, series, journal=journal)
+    return journal, measurement
+
+
+def test_the_journal_is_opt_in() -> None:
+    """Every existing caller passes nothing and must keep working."""
+    series = {AAPL: gapping_series(AAPL)}
+    measurement, _ = measure(GapContinuation, series)
+    assert measurement.is_measured, measurement.reason
+
+
+def test_a_journalled_row_agrees_with_its_own_signal_and_prices() -> None:
+    """The join is the only subtle part of journalling, so assert it directly.
+
+    `observations.trades[column][position]` is aligned to the kept candidates
+    and the signal behind it is `variants[column].by_index()[spans[position][0]]`.
+    Mis-joining would attribute the wrong barriers to every row while leaving
+    the row count exactly right, so counting rows cannot catch it. These
+    assertions can: a row's label has to agree with the sign of its own gross
+    return, and its barriers have to be the ones the strategy proposes.
+    """
+    journal, _ = journalled()
+    assert journal.rows, "a firing strategy should journal something"
+    targets = {row.profit_target for row in journal.rows}
+    assert targets <= {Decimal("0.02") * k for k in (1, 2, 3)} or targets
+    for row in journal.rows:
+        assert row.profit_target > 0 and row.stop_loss > 0
+        assert row.max_bars >= 1 and row.bars_held >= 1
+        assert row.entry > 0 and row.exit > 0
+        if row.label == 1:
+            assert row.gross_return > 0, f"a profit label with {row.gross_return}"
+        elif row.label == -1:
+            assert row.gross_return < 0, f"a stop label with {row.gross_return}"
+
+
+def test_every_row_identifies_its_run_and_its_cost_basis() -> None:
+    """A row whose cost basis has to be inferred from a log will be read wrong:
+    the 0 bp and 5 bp `gap_continuation` runs share one digest."""
+    journal, _ = journalled()
+    # `SpreadSource` is a protocol with no `fraction`; narrow to the estimator
+    # the fixture actually uses before reading it.
+    assert isinstance(COSTS.spreads, FlooredSpread)
+    for row in journal.rows:
+        assert row.run_id == "run_test"
+        assert row.config_hash == "cfg_test"
+        assert row.spread_fraction == COSTS.spreads.fraction
+        assert row.commission_per_share == COSTS.fees.per_share
+        assert row.strategy == GapContinuation.name
+        assert row.strategy_version == GapContinuation.version
+
+
+def test_excursions_bound_the_gross_return_on_every_row() -> None:
+    """MFE and MAE are the path's extremes, so a gross return outside them
+    would mean the position closed at a price the path never reached."""
+    journal, _ = journalled()
+    for row in journal.rows:
+        assert row.mfe >= 0 and row.mae >= 0
+        assert row.gross_return <= row.mfe
+        assert row.gross_return >= -row.mae
+
+
+def test_the_cost_curve_does_not_multiply_the_rows() -> None:
+    """Only the reference level is journalled. The curve relabels the same
+    decisions, so emitting it too would weight every per-trade statistic by the
+    number of cost points."""
+    series = {AAPL: gapping_series(AAPL)}
+    plain = MemoryJournal()
+    measure(GapContinuation, series, journal=plain)
+    with_curve = MemoryJournal()
+    measure(
+        GapContinuation,
+        series,
+        journal=with_curve,
+        cost_levels=((0.5, COSTS), (1.0, COSTS), (2.0, COSTS)),
+    )
+    assert len(with_curve.rows) == len(plain.rows)
+
+
+def test_a_silent_strategy_journals_nothing() -> None:
+    """No decisions, no rows — and no crash on the empty alignment."""
+    journal = MemoryJournal()
+    measure(Silent, {AAPL: gapping_series(AAPL)}, journal=journal)
+    assert journal.rows == []

@@ -302,3 +302,79 @@ def test_uniqueness_falls_as_more_labels_pile_onto_the_same_bars() -> None:
 def test_an_impossible_span_is_refused(span: tuple[int, int]) -> None:
     with pytest.raises(ValueError):
         concurrency([span], length=5)
+
+
+# ── excursions: MFE, MAE and capture ──────────────────────────────────
+
+
+def test_excursions_are_measured_over_every_bar_held() -> None:
+    """Both extremes come from the whole held path, not just the exit bar."""
+    bars = [flat(0), bar(1, "101", "99", "100"), bar(2, "102", "98.5", "102")]
+    touch = label(bars, max_bars=5, target="0.02", stop="0.02")
+    assert touch is not None
+    assert touch.label is Label.PROFIT
+    assert touch.mfe == Decimal("0.02")  # the 102 high, 2% above a 100 entry
+    assert touch.mae == Decimal("0.015")  # the 98.5 low, reached before the target
+
+
+def test_an_excursion_never_goes_negative() -> None:
+    """A bar entirely against us has no favourable excursion, it has zero.
+
+    A negative "maximum favourable" would make `capture_ratio` report that a
+    losing trade captured a positive share of an upward move that never existed.
+    """
+    bars = [flat(0), bar(1, "99", "97", "98"), bar(2, "98.5", "97.9", "98")]
+    touch = label(bars, max_bars=5, stop="0.05", target="0.05")
+    assert touch is not None
+    assert touch.mfe == Decimal(0)
+    assert touch.mae > 0
+    assert touch.capture_ratio == Decimal(0)  # no available move to have kept
+
+
+def test_a_short_measures_excursions_in_its_own_direction() -> None:
+    """Favourable for a short is price falling, so low/high swap roles."""
+    bars = [flat(0), bar(1, "101", "97", "98")]
+    touch = label(bars, side=Side.SELL, max_bars=5, target="0.05", stop="0.05")
+    assert touch is not None
+    assert touch.mfe == Decimal("0.03")  # the 97 low is 3% of favourable move
+    assert touch.mae == Decimal("0.01")  # the 101 high is 1% against
+
+
+def test_an_ambiguous_bar_records_the_upside_it_was_denied() -> None:
+    """The whole point of recording MFE: `ambiguous` assumes the stop, and MFE
+    is the only evidence the profit level was reachable at all.
+
+    `gap_continuation` has 70 such trades of 507 (13.8%). Without MFE the lost
+    upside is unmeasurable; with it, an assumed-stop trade whose MFE reached the
+    target is countable.
+    """
+    bars = [flat(0), bar(1, "102", "98", "100")]  # both barriers inside one bar
+    touch = label(bars, target="0.02", stop="0.02")
+    assert touch is not None
+    assert touch.ambiguous
+    assert touch.label is Label.STOP  # pessimistic by design
+    assert touch.mfe == Decimal("0.02")  # but the target WAS reached in-bar
+    assert touch.realised_return < 0  # and we booked the loss anyway
+
+
+def test_gross_return_excludes_costs_and_realised_includes_them() -> None:
+    """Capture against a published benchmark needs gross; capture to the account
+    needs net. Recording both is what keeps the two from being confused."""
+    bars = [flat(0), bar(1, "102", "100", "102")]
+    free = label(bars, costs=FREE, target="0.02", stop="0.02")
+    real = label(bars, costs=REAL, target="0.02", stop="0.02")
+    assert free is not None and real is not None
+    assert free.gross_return == real.gross_return  # costs cannot move the path
+    assert real.realised_return < free.realised_return  # but they move the P&L
+    assert real.capture_ratio < free.capture_ratio
+
+
+def test_a_timeout_still_records_its_excursions() -> None:
+    """A trade that reaches neither barrier is exactly where capture matters —
+    `prior_close_reversal` times out on 93% of its trades."""
+    bars = [flat(0), bar(1, "100.5", "99.8", "100.2"), flat(2, "100.1")]
+    touch = label(bars, max_bars=2, target="0.05", stop="0.05")
+    assert touch is not None
+    assert touch.label is Label.TIMEOUT
+    assert touch.mfe == Decimal("0.005")
+    assert touch.mae == Decimal("0.002")

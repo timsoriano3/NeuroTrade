@@ -37,9 +37,10 @@ from typing import Final
 
 from neurotrade.core.clock import Nanos, SimClock, to_datetime
 from neurotrade.core.costs import CostModel
-from neurotrade.core.events import BarInterval
+from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.intent import Intent
-from neurotrade.core.ports import CalendarPort, StoragePort
+from neurotrade.core.ports import CalendarPort, StoragePort, TradeJournalPort
+from neurotrade.core.trades import TradeRecord
 from neurotrade.core.trials import TrialSource
 from neurotrade.core.types import Quantity, Symbol
 from neurotrade.features.cross_section import BenchmarkSource
@@ -377,6 +378,8 @@ def measure_strategy(
     pbo_blocks: int = 8,
     family: str | None = None,
     ungated: bool = True,
+    journal: TradeJournalPort | None = None,
+    run_id: str = "",
     source: TrialSource = TrialSource.MANUAL,
     cost_levels: Sequence[tuple[float, CostModel]] = (),
     resamples: int = DEFAULT_RESAMPLES,
@@ -549,6 +552,19 @@ def measure_strategy(
             costs=costs,
             quantity=quantity,
         )
+        if journal is not None:
+            _journal_trades(
+                journal,
+                symbol=symbol,
+                bars=bars,
+                variants=variants,
+                observations=observations,
+                strategy=strategy,
+                costs=costs,
+                config_hash=ledger.config_hash,
+                run_id=run_id,
+                recorded_ns=clock.now_ns(),
+            )
         parts.append(
             Part(
                 key=str(symbol),
@@ -722,6 +738,82 @@ class _Level:
     def expectancy(self) -> float:
         """Mean return per trade. Zero when nothing traded, never `nan`."""
         return self.total / self.n_trades if self.n_trades else 0.0
+
+
+def _journal_trades(
+    journal: TradeJournalPort,
+    *,
+    symbol: Symbol,
+    bars: Sequence[Bar],
+    variants: Sequence[Variant],
+    observations: Observations,
+    strategy: type[Strategy],
+    costs: CostModel,
+    config_hash: str,
+    run_id: str,
+    recorded_ns: Nanos,
+) -> None:
+    """Write one row per labelled trade for this instrument.
+
+    **The join, which is the only subtle part.** `observations.trades[v]` is a
+    tuple per variant, aligned to the candidate bars that were kept, and
+    `observations.spans[i][0]` is the bar index of position `i` in that
+    alignment. So the signal behind `trades[v][i]` is
+    `variants[v].by_index()[spans[i][0]]`, and `None` means that variant did
+    not fire on that bar. Getting this wrong would mis-attribute every barrier
+    in the journal while leaving the counts plausible, which is why
+    `test_journalled_rows_carry_the_barriers_of_their_own_signal` asserts the
+    emitted barriers against the signal's rather than only counting rows.
+
+    Only the reference cost level is journalled. The curve's levels relabel the
+    same decisions at different charges, so emitting them too would multiply
+    identical rows by the number of cost points and make every per-trade
+    statistic silently weighted.
+    """
+    # `FlooredSpread` is the research default and the only estimator with a
+    # `fraction`; a future measured estimator may have none, so the basis is
+    # recorded as zero rather than guessed at.
+    spread_fraction = Decimal(getattr(costs.spreads, "fraction", Decimal(0)))
+    commission = Decimal(getattr(costs.fees, "per_share", Decimal(0)))
+    indexed = [variant.by_index() for variant in variants]
+    for position, (index, _) in enumerate(observations.spans):
+        entry_ns = bars[index].ts_event
+        for column, (variant, decisions) in enumerate(zip(variants, indexed, strict=True)):
+            # By position, never `variants.index(variant)`: two variants with the
+            # same label and signals compare equal, and `.index` would then
+            # attribute both columns' trades to the first of them.
+            touch = observations.trades[column][position]
+            signal = decisions.get(index)
+            if touch is None or signal is None:
+                continue
+            journal.append(
+                TradeRecord(
+                    run_id=run_id,
+                    config_hash=config_hash,
+                    recorded_ns=recorded_ns,
+                    symbol=str(symbol),
+                    strategy=strategy.name,
+                    strategy_version=strategy.version,
+                    variant=variant.label,
+                    side=signal.side,
+                    entry_ns=entry_ns,
+                    exit_ns=touch.touched_at,
+                    bars_held=touch.bars_held,
+                    entry=touch.entry.value,
+                    exit=touch.exit.value,
+                    profit_target=signal.profit_target,
+                    stop_loss=signal.stop_loss,
+                    max_bars=signal.max_bars,
+                    label=int(touch.label),
+                    ambiguous=touch.ambiguous,
+                    realised_return=touch.realised_return,
+                    gross_return=touch.gross_return,
+                    mfe=touch.mfe,
+                    mae=touch.mae,
+                    spread_fraction=spread_fraction,
+                    commission_per_share=commission,
+                )
+            )
 
 
 def _curve_of(

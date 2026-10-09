@@ -21,6 +21,7 @@ goodwill.
 | `quality.py` | How to describe a corpus: `Coverage`, `Gap`, `Duplicate`, `SuspectSession`. Returned by `CorpusQualityPort`, so they cannot live in an adapter |
 | `costs.py` | What a trade costs: spread, commission, modelled slippage. In `core` so research and live share one implementation |
 | `trials.py` | `Trial` — one recorded hypothesis test. Returned by `TrialLedgerPort`, so it cannot live in `lab/` |
+| `trades.py` | `TradeRecord` — one labelled trade, its excursions and the cost basis in force. Appended by `TradeJournalPort`, so it cannot live in `lab/` either. Carries no PIT feature snapshot yet |
 | `ids.py` | Identifiers, derived from content so a replay reproduces them |
 | `codec.py` | Turning events into text and back, without losing precision |
 | `intent.py` | What a strategy proposes: a side and where the idea is wrong |

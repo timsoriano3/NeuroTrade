@@ -205,6 +205,10 @@ class Evaluation:
     hit_rate: float  # share of those trades that made money after costs
     n_timeouts: int  # trades closed by the time barrier rather than a price barrier
     n_ambiguous: int  # trades where both barriers fell in one bar; the stop was assumed
+    mean_mfe: float = 0.0  # mean maximum favourable excursion, fraction of entry, gross
+    capture_ratio: float = (
+        0.0  # sum(realised, net) / sum(mfe, gross) — share of available move kept
+    )
     n_clusters: int | None = None  # independent groups the observations fall in; None if not given
     deflated_clustered: float | None = None  # DSR recomputed at `n_clusters`; always nearer 0.5
     n_trials_effective: int | None = None  # independent looks the search was worth, <= n_variants
@@ -254,6 +258,7 @@ class Evaluation:
             f"{self.best_label} sharpe={self.best_sharpe:+.4f} hurdle={self.hurdle:.4f} "
             f"dsr={self.deflated:.3f} pbo={self.pbo:.3f} "
             f"exp={self.expectancy:+.5f}/trade hit={self.hit_rate:.2f} "
+            f"capture={self.capture_ratio:+.2f}@mfe{self.mean_mfe:.4f} "
             f"trials={self.n_variants} obs={self.n_observations} trades={self.n_trades}"
         )
         if self.deflated_effective is not None and self.n_trials_effective is not None:
@@ -757,6 +762,8 @@ def assess(
         hit_rate=sum(touch.is_win for touch in taken) / len(taken),
         n_timeouts=sum(touch.label is Label.TIMEOUT for touch in taken),
         n_ambiguous=sum(touch.ambiguous for touch in taken),
+        mean_mfe=sum(float(touch.mfe) for touch in taken) / len(taken),
+        capture_ratio=_capture_ratio(taken),
         n_clusters=n_clusters,
         deflated_clustered=clustered,
         n_trials_effective=looks,
@@ -853,6 +860,31 @@ def _sharpe_or_flat(series: Sequence[float]) -> float:
     if len(series) < 2 or len(set(series)) < 2:
         return 0.0
     return sharpe_ratio(series)
+
+
+def _capture_ratio(taken: Sequence[BarrierTouch]) -> float:
+    """Share of the available favourable move the trades actually kept.
+
+    A ratio of sums rather than a mean of per-trade ratios: one trade whose
+    favourable excursion was a fraction of a tick would otherwise dominate the
+    average, since its own ratio can be arbitrarily large.
+
+    Net realised over gross excursion, so the round trip's cost shows up as lost
+    capture — which is the point. A negative figure means the trades gave back
+    more than the move ever offered.
+
+    Returns:
+        Zero when no trade had any favourable excursion, which is the only case
+        where the denominator vanishes.
+
+    Example:
+        >>> _capture_ratio([])
+        0.0
+    """
+    available = sum(float(touch.mfe) for touch in taken)
+    if available <= 0:
+        return 0.0
+    return sum(float(touch.realised_return) for touch in taken) / available
 
 
 def _path_sharpes(

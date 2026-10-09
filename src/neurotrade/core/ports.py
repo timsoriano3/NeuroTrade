@@ -39,6 +39,7 @@ from neurotrade.core.events import Bar, BarInterval, Event
 from neurotrade.core.ids import OrderId
 from neurotrade.core.orders import Order
 from neurotrade.core.quality import Coverage, Duplicate, Gap, SuspectSession
+from neurotrade.core.trades import TradeRecord
 from neurotrade.core.trials import Trial
 from neurotrade.core.types import Symbol, Venue
 from neurotrade.core.universe import Universe
@@ -52,6 +53,7 @@ __all__ = [
     "EventStorePort",
     "MarketDataPort",
     "StoragePort",
+    "TradeJournalPort",
     "TrialLedgerPort",
     "UniversePort",
 ]
@@ -574,6 +576,45 @@ class CatalogPort(Protocol):
             Absent means none held. Empty when the corpus holds nothing for
             this instrument, which is ordinary rather than exceptional.
         """
+        ...
+
+
+@runtime_checkable
+class TradeJournalPort(Protocol):
+    """Where individual labelled trades are written (Invariants).
+
+    Separate from `TrialLedgerPort` because the two answer different questions
+    at different granularities. A trial is one hypothesis and its Sharpe; the
+    ledger must outlive every run so deflation can count searches from months
+    ago. A trade is one decision and what became of it, scoped to the run that
+    produced it, and there are tens of thousands per run.
+
+    Append-only, and appended as the run proceeds rather than at the end: the
+    September wave lost ten per-run ledgers to a `/private/tmp` reap, and a
+    journal only written on clean exit is a journal that vanishes exactly when
+    a crashed run is the one worth reading.
+
+    Example:
+        >>> class MemoryJournal:
+        ...     def __init__(self): self._rows = []
+        ...     def append(self, record): self._rows.append(record)
+        ...     def records(self): return tuple(self._rows)
+        >>> isinstance(MemoryJournal(), TradeJournalPort)
+        True
+    """
+
+    def append(self, record: TradeRecord) -> None:
+        """Write one trade.
+
+        Args:
+            record: The decision, its barriers and its outcome. Appended
+                whatever the outcome — journalling only the winners produces a
+                training set that cannot learn to decline a trade.
+        """
+        ...
+
+    def records(self) -> tuple[TradeRecord, ...]:
+        """Every trade written, in the order it was appended."""
         ...
 
 

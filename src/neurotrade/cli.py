@@ -55,6 +55,7 @@ from neurotrade.adapters.storage.duckdb_catalog import DuckDBCatalog
 from neurotrade.adapters.storage.event_store import EventStore
 from neurotrade.adapters.storage.parquet_store import ParquetStore
 from neurotrade.adapters.storage.schemas import Source
+from neurotrade.adapters.storage.trade_journal import TradeJournalStore
 from neurotrade.adapters.storage.trial_ledger import TrialLedgerStore
 from neurotrade.adapters.universe.sector_file import InvalidSectorFile, SectorFile
 from neurotrade.adapters.universe.universe_file import InvalidUniverseFile, UniverseFile
@@ -1825,6 +1826,17 @@ def lab_measure(
             ),
         ),
     ] = None,
+    journal: Annotated[
+        Path | None,
+        typer.Option(
+            "--journal",
+            help=(
+                "Write one JSONL row per labelled trade here: barriers, outcome, "
+                "excursions and the cost basis in force. Without it the per-trade "
+                "records are aggregated into counts and discarded."
+            ),
+        ),
+    ] = None,
     spread_bps: Annotated[
         float | None,
         typer.Option(
@@ -2018,6 +2030,8 @@ def lab_measure(
         ledger=ledger,
         clock=SimClock(clock.now_ns()),
         costs=reference,
+        journal=TradeJournalStore(journal) if journal is not None else None,
+        run_id=str(app_context.run_id),
         quantity=Quantity(quantity),
         warmup_ns=warmup_days * 86_400_000_000_000,
         cost_levels=levels,

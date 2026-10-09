@@ -103,9 +103,13 @@ class BarrierTouch:
         ...     label=Label.PROFIT, touched_at=1_000, bars_held=5,
         ...     entry=Price("100"), exit=Price("102"),
         ...     realised_return=Decimal("0.018"), ambiguous=False,
+        ...     mfe=Decimal("0.025"), mae=Decimal("0.004"),
+        ...     gross_return=Decimal("0.02"),
         ... )
         >>> touch.is_win
         True
+        >>> touch.capture_ratio  # kept 72% of the move that was available
+        Decimal('0.72')
     """
 
     label: Label  # which barrier was hit
@@ -115,6 +119,9 @@ class BarrierTouch:
     exit: Price  # price the position was closed at
     realised_return: Decimal  # signed fractional return NET of modelled costs
     ambiguous: bool  # both barriers fell inside the exit bar; the stop was assumed
+    mfe: Decimal  # max FAVOURABLE excursion while held, fraction of entry, GROSS, >= 0
+    mae: Decimal  # max ADVERSE excursion while held, fraction of entry, GROSS, >= 0
+    gross_return: Decimal  # signed fractional return BEFORE costs, for like-for-like capture
 
     @property
     def is_win(self) -> bool:
@@ -126,6 +133,33 @@ class BarrierTouch:
         hides.
         """
         return self.realised_return > 0
+
+    @property
+    def capture_ratio(self) -> Decimal:
+        """Share of the available favourable move this trade actually kept.
+
+        `realised_return / mfe`. Net over gross deliberately: the question is
+        what reached the account, not what the price did. So a trade that exits
+        exactly at its favourable extreme still scores below 1 by the round-trip
+        cost, and `gross_return / mfe` is the figure to use when comparing
+        against published capture-ratio benchmarks, which are gross.
+
+        Returns:
+            Zero when `mfe` is zero — a trade that never went our way has no
+            available move to have captured a share of, and the alternative is
+            a ZeroDivisionError on an entirely ordinary losing trade.
+
+        Example:
+            >>> BarrierTouch(label=Label.STOP, touched_at=0, bars_held=1,
+            ...     entry=Price("100"), exit=Price("99"),
+            ...     realised_return=Decimal("-0.01"), ambiguous=False,
+            ...     mfe=Decimal("0"), mae=Decimal("0.01"),
+            ...     gross_return=Decimal("-0.01")).capture_ratio
+            Decimal('0')
+        """
+        if self.mfe == 0:
+            return Decimal(0)
+        return (self.realised_return / self.mfe).quantize(_RETURN_PLACES).normalize()
 
 
 def triple_barrier(
@@ -209,13 +243,28 @@ def triple_barrier(
     profit_level = upper
     stop_level = lower
 
+    # Excursion extremes over the bars actually held. Updated before the barrier
+    # test so the exit bar counts: it is held, and on an ambiguous bar it is the
+    # only evidence that the profit level was reachable at all.
+    mfe = Decimal(0)
+    mae = Decimal(0)
+
     for offset, bar in enumerate(forward, start=1):
         if side is Side.BUY:
+            favourable = (bar.high.value - entry.value) / entry.value
+            adverse = (entry.value - bar.low.value) / entry.value
             hit_profit = bar.high.value >= profit_level
             hit_stop = bar.low.value <= stop_level
         else:
+            favourable = (entry.value - bar.low.value) / entry.value
+            adverse = (bar.high.value - entry.value) / entry.value
             hit_profit = bar.low.value <= profit_level
             hit_stop = bar.high.value >= stop_level
+
+        # Floored at zero: a bar entirely against us has no favourable excursion,
+        # and a negative "maximum favourable" would make `capture_ratio` lie.
+        mfe = max(mfe, favourable)
+        mae = max(mae, adverse)
 
         if not (hit_profit or hit_stop):
             continue
@@ -237,6 +286,8 @@ def triple_barrier(
             quantity=quantity,
             volatility=volatility,
             ambiguous=ambiguous,
+            mfe=mfe,
+            mae=mae,
         )
 
     last = forward[-1]
@@ -251,6 +302,8 @@ def triple_barrier(
         quantity=quantity,
         volatility=volatility,
         ambiguous=False,
+        mfe=mfe,
+        mae=mae,
     )
 
 
@@ -266,6 +319,8 @@ def _touch(
     quantity: Quantity,
     volatility: float | None,
     ambiguous: bool,
+    mfe: Decimal,
+    mae: Decimal,
 ) -> BarrierTouch:
     """Build a `BarrierTouch`, applying costs to both legs.
 
@@ -286,6 +341,9 @@ def _touch(
         exit=exit_price,
         realised_return=(net / notional).quantize(_RETURN_PLACES),
         ambiguous=ambiguous,
+        mfe=mfe.quantize(_RETURN_PLACES),
+        mae=mae.quantize(_RETURN_PLACES),
+        gross_return=(gross / entry.value).quantize(_RETURN_PLACES),
     )
 
 
