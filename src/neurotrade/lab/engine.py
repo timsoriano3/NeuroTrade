@@ -14,6 +14,13 @@ digest even though the input data is identical, and the collected intents are
 guaranteed to be exactly what the bus saw rather than a parallel bookkeeping
 that could drift from it.
 
+**And the engine stamps each one with the view it was produced under.** The
+`StrategyContext` a strategy was handed is frozen into the intent's `features`
+on the way to the bus, which is how the point-in-time snapshot the Invariants
+require reaches a journalled trade. Doing it here rather than in each strategy
+makes it total — there is exactly one place an intent becomes observable, and it
+cannot be bypassed. See `_publish`.
+
 **No fills happen here.** An intent is a proposal (§5.1), and what becomes of it
 is `lab/labelling.py`'s triple barrier, not a fill simulator. Keeping the engine
 out of the execution business means there is only one place that decides how a
@@ -43,7 +50,7 @@ six weeks later as though the gate had been on.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from neurotrade.bus import EventBus
@@ -329,16 +336,34 @@ class BacktestEngine:
             view = self.context(event, strategy)
             if not self._may_fire(strategy, view.regime):
                 return
-            self._publish(strategy.on_bar(event, view))
+            self._publish(strategy.on_bar(event, view), view)
 
         return handle
 
-    def _publish(self, intents: Sequence[Intent]) -> None:
-        """Put a strategy's proposals on the bus.
+    def _publish(self, intents: Sequence[Intent], view: StrategyContext) -> None:
+        """Stamp a strategy's proposals with what it was shown, and publish them.
 
         Published rather than appended directly: the bus is what the digest
         observes, so an intent that skipped it would be invisible to the proof
         that this run behaved the way the last one did.
+
+        **The host stamps the feature snapshot, not the strategy.** This is the
+        single place an intent becomes observable in a backtest, so stamping
+        here makes the snapshot total: no strategy can forget to attach one, and
+        the record is what the engine *handed over* rather than what the
+        strategy chose to report about itself. The alternative — a required
+        `features` argument at every strategy's `Intent(...)` call — is ten
+        sites that each have to remember, and a forgotten one would journal an
+        empty snapshot while looking correct.
+
+        The stamp is unconditional, overwriting anything the strategy set. The
+        engine knows what it showed; a self-reported snapshot is at best the
+        same value and at worst a claim nothing checked.
+
+        Args:
+            intents: What the strategy returned for this bar, in its order.
+            view: The context that produced them, captured as of the same bar.
         """
+        snapshot = view.snapshot()
         for intent in intents:
-            self.bus.publish(intent)
+            self.bus.publish(replace(intent, features=snapshot))

@@ -9,6 +9,7 @@ than trusted to each strategy.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import ClassVar
@@ -19,6 +20,7 @@ from neurotrade.bus import HandlerFailed
 from neurotrade.core.clock import Nanos, SimClock
 from neurotrade.core.events import Bar, BarInterval, MarketSession
 from neurotrade.core.intent import EntryTrigger, Intent
+from neurotrade.core.snapshot import NO_FEATURES, FeatureSnapshot
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 from neurotrade.lab.engine import BacktestEngine, BacktestResult, NullContext
 from neurotrade.lab.feed import CorpusFeed
@@ -498,3 +500,88 @@ def test_a_day_engine_is_the_default() -> None:
     """The safe direction: a strategy that forgets to declare stays intraday."""
     assert Daily.holds_overnight is False
     assert empty_engine().overnight is False
+
+
+# ── The feature snapshot stamp ───────────────────────────────
+
+
+class ValuedContext(FixedContext):
+    """A `ContextSource` that resolves features, so there is a snapshot to stamp."""
+
+    def __init__(self, values: dict[str, float | None], regime: Regime = Regime.UNKNOWN) -> None:
+        super().__init__(regime)
+        self._values = values
+
+    def __call__(self, bar: Bar, strategy: Strategy) -> StrategyContext:
+        return StrategyContext(
+            symbol=bar.symbol,
+            as_of=bar.ts_event,
+            session=MarketSession.REGULAR,
+            regime=self.regime,
+            values=self._values,
+        )
+
+
+class Liar(Proposer):
+    """Reports a snapshot of its own. The host must not believe it."""
+
+    name, version = "liar", "1.0.0"
+
+    def on_bar(self, bar: Bar, context: StrategyContext) -> Sequence[Intent]:
+        return tuple(
+            replace(intent, features=FeatureSnapshot.of({"rvol": 999.0}))
+            for intent in super().on_bar(bar, context)
+        )
+
+
+def test_every_published_intent_carries_the_view_it_was_produced_under() -> None:
+    """The host stamps at the one place an intent reaches the bus, so a strategy
+    cannot forget to — which is what makes the PIT snapshot total rather than a
+    convention ten strategies each have to remember."""
+    engine = engine_with(ValuedContext({"rvol": 3.2, "atr": None}))
+    engine.add_strategy(Proposer())
+    result = engine.run(0, 100)
+    assert len(result.intents) == 2
+    for intent in result.intents:
+        assert intent.features == FeatureSnapshot.of({"rvol": 3.2, "atr": None})
+
+
+def test_a_strategy_that_declared_nothing_gets_an_empty_snapshot() -> None:
+    """Empty is a true statement about that decision, not a missing stamp."""
+    engine = engine_with(ValuedContext({}))
+    engine.add_strategy(Proposer())
+    assert all(intent.features == NO_FEATURES for intent in engine.run(0, 100).intents)
+
+
+def test_the_host_overwrites_a_snapshot_the_strategy_set_itself() -> None:
+    """The engine knows what it showed; a self-reported snapshot is at best the
+    same value and at worst a claim nothing checked."""
+    engine = engine_with(ValuedContext({"rvol": 3.2}))
+    engine.add_strategy(Liar())
+    assert all(
+        intent.features == FeatureSnapshot.of({"rvol": 3.2})
+        for intent in engine.run(0, 100).intents
+    )
+
+
+def test_a_changed_feature_value_changes_the_digest() -> None:
+    """The snapshot is a model input, so it has to be inside the proof that two
+    runs behaved identically. Kept beside the stream it would not be, and two
+    runs whose inputs differed would report the same digest."""
+    digests = []
+    for rvol in (3.2, 3.3):
+        engine = engine_with(ValuedContext({"rvol": rvol}))
+        engine.add_strategy(Proposer())
+        digests.append(engine.run(0, 100).digest)
+    assert digests[0] != digests[1]
+
+
+def test_two_runs_with_the_same_features_still_agree() -> None:
+    """The other half of the previous test: the snapshot is sorted on
+    construction, so nothing about it can make a repeat run disagree."""
+    digests = []
+    for _ in range(2):
+        engine = engine_with(ValuedContext({"z": 1.0, "a": 2.0, "m": None}))
+        engine.add_strategy(Proposer())
+        digests.append(engine.run(0, 100).digest)
+    assert digests[0] == digests[1]

@@ -24,13 +24,20 @@ row that will eventually be read wrong.
 `-1` stop. The mapping is stated here because it is the one thing a reader
 cannot recover from the field's type.
 
-**What is deliberately absent: the point-in-time feature snapshot.** The
-Invariants require one on every trade record, and nothing in the pipeline
-produces it today — `Intent` carries no feature values, so the engine's
-`StrategyContext.feature` readings are gone by the time a decision is labelled.
-Attaching them is a change to an event type and therefore to replay
-determinism, which belongs in its own commit. Until then this record describes
-an outcome fully and its cause not at all, and no model should be trained on it.
+**The point-in-time feature snapshot is required, with no default.** The
+Invariants demand one on every trade record, and this is the record they mean,
+so the field is mandatory here while `Intent.features` and `Signal.features`
+both default to empty. Those two have instances that legitimately have nothing
+to report — a synthetic control, a hand-built labelling fixture — whereas a row
+written to the journal must always state what the decision was taken on, even
+when the honest answer is "nothing was recorded". A caller forced to type that
+is a caller who notices it.
+
+The snapshot arrives by being carried, never re-derived: the engine stamps it
+onto the `Intent` from the `StrategyContext` the strategy was handed
+(`lab/engine.py`), `signals_from_intents` moves it onto the `Signal`, and
+`_journal_trades` copies it here. Resolving the features a second time at any
+of those steps would be the research/live divergence §3.6 exists to prevent.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from neurotrade.core.clock import Nanos
+from neurotrade.core.snapshot import FeatureSnapshot
 from neurotrade.core.types import Side
 
 __all__ = ["TradeRecord"]
@@ -61,6 +69,7 @@ class TradeRecord:
         ...     mfe=Decimal("0.025"), mae=Decimal("0.004"),
         ...     spread_fraction=Decimal("0.0005"),
         ...     commission_per_share=Decimal("0.005"),
+        ...     features=FeatureSnapshot.of({"gap_ranges": 1.6, "rvol": None}),
         ... )
         >>> record.is_win, record.reached_target
         (True, True)
@@ -90,6 +99,11 @@ class TradeRecord:
     mae: Decimal  # max adverse excursion while held, fraction of entry, gross, >= 0
     spread_fraction: Decimal  # the spread estimate in force, as a fraction of price
     commission_per_share: Decimal  # the commission in force, per share, in the fee currency
+    features: FeatureSnapshot
+    """What the strategy had resolved at `entry_ns` — the PIT snapshot, carried
+    from the `Intent`. A `None` inside it means that feature was still warming
+    up; an empty snapshot means none was recorded at all, which is what the
+    synthetic controls and any row written before this field existed report."""
 
     @property
     def is_win(self) -> bool:
@@ -121,6 +135,7 @@ class TradeRecord:
             ...     realised_return=Decimal("-0.02"), gross_return=Decimal("-0.02"),
             ...     mfe=Decimal("0.02"), mae=Decimal("0.02"),
             ...     spread_fraction=Decimal("0"), commission_per_share=Decimal("0"),
+            ...     features=FeatureSnapshot(),
             ... ).reached_target
             True
         """

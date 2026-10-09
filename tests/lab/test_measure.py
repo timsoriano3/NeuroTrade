@@ -32,7 +32,7 @@ from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 from neurotrade.features.indicators import indicators
 from neurotrade.lab.measure import Measurement, measure_strategy
 from neurotrade.lab.trials import TrialLedger
-from neurotrade.strategies.base import Regime, Strategy, StrategyContext
+from neurotrade.strategies.base import FeatureRef, Regime, Strategy, StrategyContext
 from neurotrade.strategies.gap_continuation import GapContinuation
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
@@ -616,3 +616,78 @@ def test_a_silent_strategy_journals_nothing() -> None:
     journal = MemoryJournal()
     measure(Silent, {AAPL: gapping_series(AAPL)}, journal=journal)
     assert journal.rows == []
+
+
+# ── the point-in-time feature snapshot ──────────────────────────────────
+
+
+class Featured(Strategy):
+    """Declares a real feature and proposes once it is warm.
+
+    `GapContinuation` reads only session levels and declares nothing, so it
+    cannot show that a feature value reaches a journalled row. This can.
+    """
+
+    name, version = "featured", "1.0.0"
+    regimes: ClassVar[tuple[Regime, ...]] = (Regime.UNKNOWN,)
+    features: ClassVar[tuple[FeatureRef, ...]] = (FeatureRef("atr"),)
+
+    @classmethod
+    def sweep(cls) -> tuple[tuple[str, Self], ...]:
+        return (("a", cls()), ("b", cls()))
+
+    def on_bar(self, bar: Bar, context: StrategyContext) -> Sequence[Intent]:
+        if not context.requires("atr"):
+            return ()
+        return (
+            Intent(
+                symbol=bar.symbol,
+                ts_event=bar.ts_event,
+                ts_init=bar.ts_event,
+                side=Side.BUY,
+                entry=EntryTrigger.MARKET,
+                entry_price=None,
+                invalidation=Price(bar.close.value * Decimal("0.99")),
+                target_r=Decimal(2),
+                horizon_ns=30 * MINUTE,
+                strategy=self.name,
+                strategy_version=self.version,
+                rationale="atr is warm",
+            ),
+        )
+
+
+def test_a_journalled_row_carries_the_features_the_decision_was_taken_on() -> None:
+    """The end of the carry: engine stamp -> Intent -> Signal -> TradeRecord.
+
+    Until this held, a journal row described an outcome fully and its cause not
+    at all, and no model could be trained on it (Invariants).
+    """
+    journal = MemoryJournal()
+    measure(Featured, {AAPL: gapping_series(AAPL)}, journal=journal)
+    assert journal.rows, "a firing strategy should journal something"
+    for row in journal.rows:
+        assert row.features.names == ("atr",)
+        value = row.features.get("atr")
+        assert isinstance(value, float)
+        # The strategy only fires once `atr` is warm, so no row may carry a
+        # `None` — a row that did would mean the guard had been bypassed.
+        assert value > 0
+
+
+def test_the_snapshot_differs_across_rows_rather_than_being_one_frozen_read() -> None:
+    """A single value repeated on every row would be the signature of the
+    snapshot having been resolved once, outside the per-bar dispatch, instead of
+    carried from the view each decision was taken under."""
+    journal = MemoryJournal()
+    measure(Featured, {AAPL: gapping_series(AAPL)}, journal=journal)
+    assert len({row.features.get("atr") for row in journal.rows}) > 1
+
+
+def test_a_strategy_declaring_no_features_journals_an_empty_snapshot() -> None:
+    """`GapContinuation` reads session levels only. Empty is the true answer for
+    it, not a missing stamp."""
+    journal = MemoryJournal()
+    measure(GapContinuation, {AAPL: gapping_series(AAPL)}, journal=journal)
+    assert journal.rows
+    assert all(row.features.is_empty for row in journal.rows)

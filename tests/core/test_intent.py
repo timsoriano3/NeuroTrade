@@ -13,6 +13,7 @@ import pytest
 
 from neurotrade.core.events import Event, MarketEvent
 from neurotrade.core.intent import EntryTrigger, Intent
+from neurotrade.core.snapshot import NO_FEATURES, FeatureSnapshot
 from neurotrade.core.types import Price, Side, Symbol, Venue
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
@@ -203,3 +204,30 @@ def test_intents_are_ordered_like_every_other_event() -> None:
 def test_reward_to_risk_is_gross_of_costs() -> None:
     """§3.3: a signal must beat spread, fees and slippage, none of which are here."""
     assert make_intent(target_r=Decimal(2)).reward_to_risk == Decimal(2)
+
+
+# ── the feature snapshot ─────────────────────────────────────
+
+
+def test_the_snapshot_defaults_to_none_recorded() -> None:
+    """Defaulted so the instances with genuinely nothing to report — the
+    synthetic controls in `lab/controls.py`, an intent decoded from a log older
+    than the field — do not have to invent a value. The host stamps the real one
+    at the single point an intent reaches the bus."""
+    assert make_intent().features is NO_FEATURES
+    assert make_intent().features.is_empty
+
+
+def test_an_intent_with_a_snapshot_is_still_hashable() -> None:
+    """A `dict` field would have made every intent unhashable, which is why the
+    snapshot is a sorted tuple of pairs."""
+    snapshot = FeatureSnapshot.of({"rvol": 3.1, "atr": None})
+    assert len({make_intent(features=snapshot), make_intent(features=snapshot)}) == 1
+
+
+def test_two_intents_differing_only_in_their_snapshot_are_not_equal() -> None:
+    """Equality has to see the snapshot, or the digest that folds the event
+    could not either."""
+    assert make_intent(features=FeatureSnapshot.of({"rvol": 3.1})) != make_intent(
+        features=FeatureSnapshot.of({"rvol": 3.2})
+    )

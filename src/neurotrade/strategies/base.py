@@ -45,6 +45,7 @@ from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Bar, MarketSession, Quote, TickTrade
 from neurotrade.core.intent import Intent
 from neurotrade.core.registry import Registry
+from neurotrade.core.snapshot import FeatureSnapshot
 from neurotrade.core.types import Symbol
 from neurotrade.features.cross_section import CrossSection
 from neurotrade.features.levels import SessionLevels
@@ -184,6 +185,32 @@ class StrategyContext:
             raise UndeclaredFeature(
                 f"{name!r} was not declared by this strategy; available: {sorted(self.values)}"
             ) from None
+
+    def snapshot(self) -> FeatureSnapshot:
+        """Freeze the resolved feature values as a point-in-time record.
+
+        This is the snapshot that rides on every `Intent` the host publishes
+        (`core/intent.py`) and lands on every journalled trade, so a model can
+        be trained on what the strategy actually saw rather than on a later
+        re-read of the feature library. Only the declared features are
+        captured: `levels` and `cross_section` are structured objects that
+        would multiply the size of every event, and nothing is yet trained on
+        them.
+
+        Returns:
+            The declared values, sorted by name. Empty when the strategy
+            declared no features — which is a true statement about the
+            decision, not a missing snapshot.
+
+        Example:
+            >>> ctx = StrategyContext(
+            ...     symbol=AAPL, as_of=0, session=MarketSession.REGULAR,
+            ...     regime=Regime.CHOP, values={"rvol": 1.8, "atr": None},
+            ... )
+            >>> ctx.snapshot().values
+            (('atr', None), ('rvol', 1.8))
+        """
+        return FeatureSnapshot.of(self.values)
 
     def requires(self, *names: str) -> bool:
         """True when every named feature has a value.

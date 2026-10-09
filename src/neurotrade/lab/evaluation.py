@@ -50,6 +50,7 @@ from neurotrade.core.clock import Nanos, SimClock
 from neurotrade.core.costs import CostModel
 from neurotrade.core.events import Bar
 from neurotrade.core.intent import EntryTrigger, Intent
+from neurotrade.core.snapshot import NO_FEATURES, FeatureSnapshot
 from neurotrade.core.trials import TrialSource
 from neurotrade.core.types import Quantity, Side
 from neurotrade.lab.cv import CombinatorialPurgedCV
@@ -96,6 +97,11 @@ class Signal:
     profit_target: Decimal  # profit barrier, as a positive fraction of the entry price
     stop_loss: Decimal  # stop barrier, as a positive fraction of the entry price
     max_bars: int  # vertical barrier, in bars after the entry bar
+    features: FeatureSnapshot = NO_FEATURES
+    """The point-in-time snapshot carried over from the `Intent`, so the journal
+    can record why a decision was taken and not only what became of it. Defaults
+    to empty because a labelling test builds signals by hand and has no features
+    to invent; `signals_from_intents` always sets it from the intent."""
 
     @property
     def reach(self) -> int:
@@ -357,6 +363,11 @@ def signals_from_intents(bars: Sequence[Bar], intents: Sequence[Intent]) -> tupl
                 profit_target=intent.target_r * stop_loss,
                 stop_loss=stop_loss,
                 max_bars=max_bars,
+                # Carried, never re-derived: the engine stamped this with the
+                # view the strategy actually saw, and resolving the features
+                # again here would be a second implementation of the same read
+                # — §3.6's one forbidden thing.
+                features=intent.features,
             )
         )
     return tuple(sorted(signals, key=lambda signal: signal.index))

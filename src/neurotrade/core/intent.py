@@ -22,6 +22,31 @@ time limit. Those are exactly ``target_r``, ``invalidation`` and ``horizon_ns``.
 This is not a coincidence to be noted later — it is what makes a live trade and
 a training label the same shape, so the meta-labeller learns from the thing the
 system actually does rather than an approximation of it.
+
+**And it carries the features it was read from.** ``features`` is the
+point-in-time snapshot of what the strategy had resolved when it decided, and
+the Invariants require one on every trade record. It rides *here*, on the
+proposal, rather than travelling alongside it, for three reasons:
+
+- **One implementation (§3.6).** The snapshot a model is trained on and the
+  snapshot a model scores live are then the same object produced at the same
+  moment, rather than two reads of the feature library that can drift. That
+  divergence is the project's named primary failure mode.
+- **It is a model input, so it belongs in the digest.** The run digest folds
+  every event the bus dispatched. A snapshot kept beside the stream would let
+  two runs whose model inputs differed produce identical digests, which is
+  exactly the determinism blind spot the digest exists to rule out.
+- **No parallel bookkeeping.** ``lab/engine.py`` publishes intents rather than
+  returning them so that what is collected is provably what the bus saw; a
+  sidecar dict keyed on ``(symbol, ts_event)`` would reintroduce the drift that
+  decision avoided.
+
+The field **defaults to an empty snapshot, and empty means "none recorded",
+not "all zero"**. The host stamps it at the one place intents reach the bus
+(``BacktestEngine._publish``), so a strategy cannot forget to; the default
+exists for the instances that genuinely have no features to report — the
+synthetic controls in ``lab/controls.py``, and an intent decoded from a log
+written before the field existed.
 """
 
 from __future__ import annotations
@@ -32,6 +57,7 @@ from enum import StrEnum
 
 from neurotrade.core.clock import Nanos
 from neurotrade.core.events import Event
+from neurotrade.core.snapshot import NO_FEATURES, FeatureSnapshot
 from neurotrade.core.types import Price, Side, Symbol
 
 __all__ = [
@@ -89,6 +115,11 @@ class Intent(Event):
     strategy: str  # registered plugin name that produced this
     strategy_version: str  # its semantic version, so a retune is distinguishable
     rationale: str  # human-readable reason, shown on the dashboard (§14) and journal (§6.3)
+    features: FeatureSnapshot = NO_FEATURES
+    """What the strategy had read when it decided — the machine-readable sibling
+    of `rationale`, and the PIT snapshot the Invariants require on every trade
+    record. Empty means none was recorded (see the module docstring), never that
+    every feature read zero."""
 
     def __post_init__(self) -> None:
         """Validate that the proposal is internally coherent.

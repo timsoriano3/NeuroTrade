@@ -35,6 +35,7 @@ from neurotrade.core.events import (
 from neurotrade.core.ids import FillId, IntentId, OrderId
 from neurotrade.core.intent import EntryTrigger, Intent
 from neurotrade.core.orders import Fill, LiquidityFlag, Order, OrderType, TimeInForce
+from neurotrade.core.snapshot import NO_FEATURES, FeatureSnapshot
 from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol, Venue
 
 AAPL = Symbol("AAPL", Venue.NASDAQ)
@@ -101,6 +102,7 @@ EVERY_EVENT: list[Event] = [
         strategy="orb_stocks_in_play",
         strategy_version="1.0.0",
         rationale="5-minute opening range break on 3x relative volume",
+        features=FeatureSnapshot.of({"rvol": 3.1, "atr_14": 1.25, "opening_range": None}),
     ),
     Intent(
         symbol=AAPL,
@@ -305,3 +307,61 @@ def test_sort_keys_survive_the_round_trip() -> None:
     events = [a_bar(ts_event=NOW, seq=1), a_bar(ts_event=NOW, seq=0)]
     restored = [codec.loads(codec.dumps(event)) for event in events]
     assert [event.sort_key for event in restored] == [(NOW, 1), (NOW, 0)]
+
+
+# ── The feature snapshot on an intent ────────────────────────
+
+
+def a_market_intent(**overrides: object) -> Intent:
+    fields: dict[str, object] = {
+        "symbol": AAPL,
+        "ts_event": NOW,
+        "ts_init": NOW,
+        "side": Side.BUY,
+        "entry": EntryTrigger.MARKET,
+        "entry_price": None,
+        "invalidation": Price("99.00"),
+        "target_r": Decimal(2),
+        "horizon_ns": 1_000,
+        "strategy": "gap_continuation",
+        "strategy_version": "1.0.0",
+        "rationale": "gap held",
+    }
+    fields.update(overrides)
+    return Intent(**fields)  # type: ignore[arg-type]
+
+
+def test_a_snapshot_survives_the_round_trip_with_its_warming_up_feature() -> None:
+    """`None` has to come back as `None`. Decoded as 0.0 it would be a value the
+    strategy never read, handed to a model as though it had."""
+    snapshot = FeatureSnapshot.of({"gap_ranges": 1.62, "rvol": None})
+    restored = codec.loads(codec.dumps(a_market_intent(features=snapshot)))
+    assert isinstance(restored, Intent)
+    assert restored.features == snapshot
+    assert restored.features.get("rvol") is None
+
+
+def test_features_are_written_as_json_numbers_not_strings() -> None:
+    """Derived features are floats by Invariant; prices are the ones that need
+    the string treatment, and conflating the two mixes precision domains."""
+    payload = json.loads(codec.dumps(a_market_intent(features=FeatureSnapshot.of({"rvol": 3.5}))))
+    assert payload["features"] == {"rvol": 3.5}
+    assert isinstance(payload["features"]["rvol"], float)
+
+
+def test_an_intent_record_without_the_key_decodes_as_none_recorded() -> None:
+    """The codec version is deliberately not bumped for this field: a log older
+    than it holds no snapshot, and the empty snapshot says exactly that.
+    Bumping instead would reseed every digest ever recorded, G1's included."""
+    payload = json.loads(codec.dumps(a_market_intent()))
+    del payload["features"]
+    restored = codec.decode(payload)
+    assert isinstance(restored, Intent)
+    assert restored.features == NO_FEATURES
+
+
+def test_the_codec_version_is_still_one() -> None:
+    """Pinned on purpose. `RunDigest` seeds itself with this value, so moving it
+    moves gate G1's pinned digest and every strategy fingerprint recorded so
+    far — for a field that older logs can be read without."""
+    assert CODEC_VERSION == "1"

@@ -769,6 +769,12 @@ def _journal_trades(
     same decisions at different charges, so emitting them too would multiply
     identical rows by the number of cost points and make every per-trade
     statistic silently weighted.
+
+    The point-in-time feature snapshot rides on the signal, which took it from
+    the intent, which the engine stamped from the view the strategy was handed.
+    So a row's `features` is what that decision was taken on and not a later
+    re-read of the feature library — see `core/trades.py` on why it is never
+    re-derived.
     """
     # `FlooredSpread` is the research default and the only estimator with a
     # `fraction`; a future measured estimator may have none, so the basis is
@@ -812,6 +818,10 @@ def _journal_trades(
                     mae=touch.mae,
                     spread_fraction=spread_fraction,
                     commission_per_share=commission,
+                    # Carried from the intent through the signal, never resolved
+                    # again here: this is the snapshot the strategy was actually
+                    # shown, which is the whole point of recording one.
+                    features=signal.features,
                 )
             )
 

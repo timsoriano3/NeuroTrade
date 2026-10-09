@@ -46,6 +46,7 @@ from neurotrade.core.events import (
 from neurotrade.core.ids import FillId, IntentId, OrderId
 from neurotrade.core.intent import EntryTrigger, Intent
 from neurotrade.core.orders import Fill, LiquidityFlag, Order, OrderType, TimeInForce
+from neurotrade.core.snapshot import FeatureSnapshot
 from neurotrade.core.types import Currency, Money, Price, Quantity, Side, Symbol, Venue
 
 __all__ = [
@@ -367,6 +368,11 @@ codec.register(
         "strategy": event.strategy,
         "strategy_version": event.strategy_version,
         "rationale": event.rationale,
+        # A JSON object, written from the snapshot's already-sorted pairs, so the
+        # bytes do not depend on the encoder sorting nested keys for us. Values
+        # stay JSON numbers: a feature is a float by Invariant, and turning one
+        # into a string here would invite it being read back as a Decimal.
+        "features": event.features.as_dict(),
     },
     lambda data: Intent(
         symbol=_parse_symbol(data["symbol"]),
@@ -382,6 +388,13 @@ codec.register(
         strategy=data["strategy"],
         strategy_version=data["strategy_version"],
         rationale=data["rationale"],
+        # `.get`, not `data[...]`, and the codec version is deliberately NOT
+        # bumped for this field. A log written before `features` existed holds no
+        # snapshot, and "none recorded" is exactly what the empty snapshot means
+        # — so decoding it is not a guess about values. Bumping the version
+        # instead would reseed `RunDigest` and move every digest ever recorded,
+        # including gate G1's, to say nothing new.
+        features=FeatureSnapshot.of(data.get("features") or {}),
     ),
 )
 

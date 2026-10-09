@@ -94,6 +94,10 @@ determinism would fail every minute of every session.
 **Intents are published, not returned.** A strategy's proposals go back on the
 bus, so they enter the digest next to the bars that caused them — a strategy
 that changes its mind changes the digest even when the input data is identical.
+On the way out the engine stamps each intent with the `StrategyContext` it was
+produced under, which is where the point-in-time feature snapshot on a
+journalled trade comes from. Doing it at the one place an intent becomes
+observable makes it total: no strategy can forget to attach one.
 
 **What does not happen here:** fills. An intent is a proposal (§5.1); what
 becomes of it is `labelling.py`'s triple barrier, not a fill simulator. One

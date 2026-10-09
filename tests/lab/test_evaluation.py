@@ -20,6 +20,7 @@ from neurotrade.core.clock import SimClock
 from neurotrade.core.costs import CostModel, FeeSchedule, FlooredSpread
 from neurotrade.core.events import Bar, BarInterval
 from neurotrade.core.intent import EntryTrigger, Intent
+from neurotrade.core.snapshot import FeatureSnapshot
 from neurotrade.core.trials import Trial, TrialSource
 from neurotrade.core.types import Price, Quantity, Side, Symbol, Venue
 from neurotrade.lab.controls import momentum_bars
@@ -680,3 +681,28 @@ def test_both_corrections_are_printed() -> None:
     assert "dsr_eff=" in printed
     assert "looks" in printed
     assert "dsr_clustered=" in printed
+
+
+# ── the feature snapshot ────────────────────────────────────
+
+
+def test_the_signal_carries_the_intents_feature_snapshot() -> None:
+    """Carried, never re-resolved. The snapshot the journal records has to be
+    the one the strategy was shown — resolving the features again here would be
+    a second implementation of the same read, which §3.6 forbids."""
+    snapshot = FeatureSnapshot.of({"gap_ranges": 1.62, "rvol": None})
+    bars = [bar(0, "100"), bar(MINUTE, "100")]
+    signal = signals_from_intents(bars, [gap_intent(features=snapshot)])[0]
+    assert signal.features == snapshot
+
+
+def test_a_signal_built_by_hand_reports_no_snapshot() -> None:
+    """A labelling fixture has no features to invent, and empty says so rather
+    than claiming every feature read zero."""
+    assert Signal(
+        index=0,
+        side=Side.BUY,
+        profit_target=Decimal("0.02"),
+        stop_loss=Decimal("0.01"),
+        max_bars=5,
+    ).features.is_empty

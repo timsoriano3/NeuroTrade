@@ -334,3 +334,29 @@ def test_membership_and_names() -> None:
     assert "breakout" in registry
     assert "nope" not in registry
     assert registry.names() == ("breakout",)
+
+
+# ── the feature snapshot ─────────────────────────────────────
+
+
+def test_snapshot_freezes_the_declared_values_sorted() -> None:
+    """What rides on every intent the host publishes. Sorted here rather than at
+    the encoder, so no run digest can inherit a mapping's iteration order."""
+    snapshot = context(values={"rvol": 3.2, "atr": None}).snapshot()
+    assert snapshot.values == (("atr", None), ("rvol", 3.2))
+
+
+def test_snapshot_keeps_a_warming_up_feature_as_none() -> None:
+    """`None` means warming up, not zero — the same convention `feature()` has.
+    Frozen as 0.0 it would be a value the strategy never read."""
+    assert context(values={"rvol": None}).snapshot().get("rvol") is None
+
+
+def test_snapshot_of_a_context_with_no_features_is_empty() -> None:
+    assert context(values={}).snapshot().is_empty
+
+
+def test_snapshot_carries_only_declared_features_not_levels() -> None:
+    """Session levels and the cross-section are structured objects that would
+    multiply the size of every event, and nothing is trained on them yet."""
+    assert context(values={"rvol": 1.0}).snapshot().names == ("rvol",)

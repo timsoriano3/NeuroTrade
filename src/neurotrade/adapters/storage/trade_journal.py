@@ -20,6 +20,15 @@ first place. A run's journal belongs to that run.
 price that round-trips to 336.32999999999998 is a price that will eventually be
 compared for equality and lose. Read back with `Decimal(str)`.
 
+**Features are written as JSON numbers, and that is not an inconsistency.** A
+derived feature is a `float` by Invariant, never a `Decimal`, and Python's JSON
+encoder emits the shortest repr that round-trips — so a float survives the trip
+exactly while a string would invite someone reading it back as a `Decimal` and
+mixing precision domains. The snapshot becomes a nested object keyed on feature
+name, which is also the shape `read_json_auto` gives a usable column for. A
+`null` inside it means that feature was still warming up at the decision, never
+that it read zero.
+
 **A bad line is fatal, not skipped.** A journal that silently drops rows gives
 a capture ratio and a continuation probability computed on an unknown subset,
 and both are the kind of number that looks plausible while being wrong.
@@ -31,6 +40,7 @@ import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from neurotrade.core.snapshot import FeatureSnapshot
 from neurotrade.core.trades import TradeRecord
 from neurotrade.core.types import Side
 
@@ -80,13 +90,14 @@ class TradeJournalStore:
         ...     mfe=Decimal("0.025"), mae=Decimal("0.004"),
         ...     spread_fraction=Decimal("0.0005"),
         ...     commission_per_share=Decimal("0.005"),
+        ...     features=FeatureSnapshot.of({"gap_ranges": 1.6, "rvol": None}),
         ... )
         >>> with tempfile.TemporaryDirectory() as directory:
         ...     store = TradeJournalStore(Path(directory) / "trades.jsonl")
         ...     store.append(record)
         ...     back = store.records()
-        ...     (back[0].symbol, back[0].entry, back[0].side is Side.BUY)
-        ('AAPL.NASDAQ', Decimal('100'), True)
+        ...     (back[0].symbol, back[0].entry, back[0].features.get("gap_ranges"))
+        ('AAPL.NASDAQ', Decimal('100'), 1.6)
     """
 
     __slots__ = ("_path",)
@@ -127,6 +138,9 @@ class TradeJournalStore:
             "max_bars": record.max_bars,
             "label": record.label,
             "ambiguous": record.ambiguous,
+            # Already in sorted order (`FeatureSnapshot` guarantees it), so the
+            # line's bytes do not depend on this encoder sorting nested keys.
+            "features": record.features.as_dict(),
         }
         for field in _DECIMAL_FIELDS:
             payload[field] = str(getattr(record, field))
@@ -169,6 +183,10 @@ class TradeJournalStore:
                             max_bars=raw["max_bars"],
                             label=raw["label"],
                             ambiguous=raw["ambiguous"],
+                            # `.get`, so a journal written before the snapshot
+                            # existed still reads back — as "none recorded",
+                            # which is what those rows truthfully hold.
+                            features=FeatureSnapshot.of(raw.get("features") or {}),
                             **{field: Decimal(raw[field]) for field in _DECIMAL_FIELDS},
                         )
                     )

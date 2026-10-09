@@ -21,10 +21,11 @@ goodwill.
 | `quality.py` | How to describe a corpus: `Coverage`, `Gap`, `Duplicate`, `SuspectSession`. Returned by `CorpusQualityPort`, so they cannot live in an adapter |
 | `costs.py` | What a trade costs: spread, commission, modelled slippage. In `core` so research and live share one implementation |
 | `trials.py` | `Trial` — one recorded hypothesis test. Returned by `TrialLedgerPort`, so it cannot live in `lab/` |
-| `trades.py` | `TradeRecord` — one labelled trade, its excursions and the cost basis in force. Appended by `TradeJournalPort`, so it cannot live in `lab/` either. Carries no PIT feature snapshot yet |
+| `trades.py` | `TradeRecord` — one labelled trade, its excursions, the cost basis in force and the point-in-time feature snapshot it was decided on. Appended by `TradeJournalPort`, so it cannot live in `lab/` either |
+| `snapshot.py` | `FeatureSnapshot` — what a strategy had resolved at one moment, sorted by name so no digest inherits a dict's ordering. Rides on `Intent` and lands on `TradeRecord` |
 | `ids.py` | Identifiers, derived from content so a replay reproduces them |
 | `codec.py` | Turning events into text and back, without losing precision |
-| `intent.py` | What a strategy proposes: a side and where the idea is wrong |
+| `intent.py` | What a strategy proposes: a side, where the idea is wrong, and the features it was read from |
 | `orders.py` | What we sent to the broker, and what came back |
 | `position.py` | What the fills add up to — size, cost basis, profit and loss |
 | `ports.py` | The interfaces to the outside world. Adapters implement these |
